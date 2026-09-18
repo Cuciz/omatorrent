@@ -1,0 +1,12 @@
+{
+  "name": "omatorrent-dev-harness",
+  "version": "0.1.0",
+  "description": "Development harness for the OmaTorrent project: specialist agents, workflow skills, /ot-* commands, and a destructive-command guard hook. This is development infrastructure, NOT the OmaTorrent product plugin.",
+  "author": {
+    "name": "OmaTorrent project"
+  },
+  "license": "MIT",
+  "keywords": ["omatorrent", "development", "harness", "review", "verification"],
+  "commands": "commands",
+  "skills": "skills"
+}

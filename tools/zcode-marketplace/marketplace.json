@@ -1,0 +1,14 @@
+{
+  "name": "omatorrent-dev",
+  "description": "Local ZCode marketplace holding the OmaTorrent development harness. Development infrastructure only — not the OmaTorrent product.",
+  "plugins": [
+    {
+      "name": "omatorrent-dev-harness",
+      "source": "./plugins/omatorrent-dev-harness",
+      "description": "OmaTorrent development harness: six specialist agents, six skills, seven /ot-* commands, and a destructive-command guard hook for ZCode.",
+      "version": "0.1.0",
+      "category": "developer-tools",
+      "tags": ["omatorrent", "harness", "agents", "skills", "commands", "hooks"]
+    }
+  ]
+}

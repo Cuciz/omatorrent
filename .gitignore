@@ -1,0 +1,22 @@
+# Build artifacts
+/dist/
+/bin/
+/build/
+*.o
+*.so
+
+# Go
+/omatorrent-service/omatorrent-service
+
+# Local state and scratch
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.log
+/tmp/
+.DS_Store
+
+# Editor
+*.swp
+.idea/
