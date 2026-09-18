@@ -1,0 +1,4 @@
+# OmaTorrent project toolchain (no-sudo bootstrap; system-wide
+# `sudo pacman -S go` remains the recommended permanent method).
+[tools]
+go = "1.27.1"
