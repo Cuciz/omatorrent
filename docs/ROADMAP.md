@@ -19,18 +19,27 @@ Dependencies and exit criteria use the evidence rules from
 | 0.9 | CI, update/rollback, hardening | all | CI green on tagged runs; upgrade + rollback tested; release gates pass |
 | 1.0 | Release | 0.9 | full release gate run (omatorrent-release skill) READY verdict |
 
-## Phase 0 — technical foundation planning (not yet started)
+## Phase 0 — technical foundation (DONE 2026-09-18, PR pending review)
 
-Reconnaissance and foundation planning for implementation:
+Foundation proven end-to-end: bar widget → IPC v1 (ADR-0004, NDJSON,
+Unix socket) → omatorrent-service (Go) → qBittorrent WebAPI 2.15.1, with
+real state only. Delivered: capability matrix (docs/QBITTORRENT.md), IPC
+v1 contract + tests, daemon skeleton (config/ipc/qbittorrent/state),
+minimal bar proof plugin (local.omatorrent) with truthful degraded
+states, systemd user unit, ot-probe debug CLI, isolated Quickshell smoke
+test (tools/test_quickshell.sh). Evidence: docs/agent/PHASE0.md.
 
-1. Environment prerequisites (Go toolchain is NOT installed on the
-   workstation yet — install decision + method, per Arch rules).
-2. Read current Omarchy Quattro shell-plugin manual + an installed built-in
-   plugin; record the official plugin pattern for the bar/panel/dashboard.
-3. qBittorrent capability matrix for the installed 5.2.x and minimum
-   supported version (omatorrent-qbt-researcher; docs/QBITTORRENT.md).
-4. IPC contract v1 design proposal → ADR review.
-5. Product plugin naming/namespace decision.
+0.1 exit criteria status: handshake + version-reject contract tests PASS;
+live probe PASS (v5.2.3 / 2.15.1); bar shows real state or explicit
+disconnected state PASS (observed live).
 
-Exit: a `/ot-plan`-quality plan for 0.1 exists, with acceptance criteria and
-verification evidence named.
+Remaining from the 0.1 line that Phase 0 deliberately did NOT build
+(they belong to 0.1+ polish or 0.2): nothing blocking; CI workflow
+(0.9), package/install automation (PACKAGING.md).
+
+## Phase 0.1 — bar widget productization (next)
+
+Tighten the proof into the daily-use widget: speed formatting options,
+per-display behavior verification, setting toggles via the native
+`settings` schema, `keepLoaded`/lifecycle review, theme-switch
+verification, and the 0.2 panel groundwork.

@@ -1,49 +1,83 @@
 # OmaTorrent — Security Model
 
-Status: DRAFT — the standing rules reviewers enforce (see the
-omatorrent-security-review skill). Product implementation has not started.
+Status: PHASE 0 IMPLEMENTED — the standing rules below are enforced by
+code and tests where noted; independent adversarial review verdicts are
+recorded in docs/agent/PHASE0.md per change.
 
 ## Secrets [DECISION]
 
 - Credentials (qBittorrent WebUI, remote/NAS/SSH) live ONLY in the secret
   provider. Never in QML, never in logs, never in SQLite, never in IPC
   responses, never in process arguments.
-- No secrets or placeholder credentials in the repository.
+- Phase 0 state: the credential source is the config file
+  (`$XDG_CONFIG_HOME/omatorrent/service.json`, optional `username`/
+  `password`), refused at load if group/world-accessible (tested:
+  `internal/config/config_test.go`). The local dev backend needs no
+  credentials (localhost bypass). A real secret provider
+  (systemd `LoadCredential=`/libsecret) is scheduled with remote-backend
+  work (0.5); the config-file stand-in is a documented, reviewed interim.
+- No secrets or placeholder credentials in the repository (secret scan
+  before every commit).
 
 ## Transport [DECISION]
 
-- Remote qBittorrent connections use TLS with verification actually enabled;
-  disabled verification is a defect, not a config option.
-- Auth failure (bad credentials) and ban (HTTP 403 after repeated failures)
-  are distinct error classes with distinct handling.
+- Remote qBittorrent connections use TLS with verification actually
+  enabled; disabled verification is a defect, not a config option.
+  (Phase 0 ships localhost HTTP only; remote+TLS lands in 0.5.)
+- Auth failure (bad credentials) and ban (HTTP 403 after repeated
+  failures) are distinct error classes with distinct handling
+  (implemented + fixture-tested in `internal/qbittorrent/client.go`).
+- The daemon is never a TCP listener; the only listener is the Unix
+  socket below.
 
-## IPC [DECISION]
+## IPC [DECISION — implemented per ADR-0004]
 
-- Unix-domain socket with explicit filesystem permissions (who may connect).
-- Versioned handshake; incompatible protocol versions rejected safely.
-- Malformed messages must never crash either side; bounded message sizes.
+- Unix-domain socket at `$XDG_RUNTIME_DIR/omatorrent/service.sock`:
+  application dir 0700, socket 0600 (umask 077 + explicit chmod,
+  contract-tested). Runtime dir validated (absolute, UID-owned, 0700,
+  no symlink components); unsafe or existing paths are refused — never
+  repaired, never auto-deleted. Shutdown removes the socket only after a
+  dev/ino identity match.
+- Versioned handshake; incompatible versions rejected safely
+  (version_mismatch, tested).
+- Malformed messages never crash either side; frames bounded at 4096
+  bytes incl. LF; duplicate keys, unknown fields, null values,
+  non-integer numbers, invalid UTF-8 and trailing JSON all rejected as
+  invalid_message (tested). Error responses never echo payload or ids.
+- Resource limits: 16 clients (excess closed silently), 5 s handshake
+  deadline, 30 s idle read deadline, 5 s write deadline. qBittorrent is
+  never contacted synchronously from an IPC request except one bounded
+  first fetch (3 s) — degraded snapshot otherwise.
+- Same-UID processes are inside the filesystem trust boundary
+  (documented in ADR-0004): a same-user attacker can race path checks.
+  Cross-UID protection is what the 0600/0700 permissions provide.
 
 ## Destructive operations [DECISION]
 
-- Deletion with file removal requires an explicit confirmation flag in the
-  IPC contract and UI confirmation; path validation prevents escape from the
-  content directory; stale-state mis-targeting must be prevented.
+- Deletion with file removal requires an explicit confirmation flag in
+  the IPC contract and UI confirmation; path validation prevents escape
+  from the content directory; stale-state mis-targeting must be
+  prevented. (No destructive operations exist before 0.3; IPC v1 has no
+  mutations.)
 
 ## VPN safety model [DECISION]
 
-- Correct qBittorrent interface binding is the primary control. VPN/network
-  monitoring is defense in depth that warns, not a mechanism that asserts
-  protection it cannot prove. UI claims must be backed by a real source.
+- Correct qBittorrent interface binding is the primary control. VPN/
+  network monitoring is defense in depth that warns, not a mechanism
+  that asserts protection it cannot prove. UI claims must be backed by a
+  real source. (0.6.)
 
 ## Systemd and packaging
 
-- User service (not system) expected; unit hardening appropriate to a
-  component handling secrets and a socket.
-- Package/install/update scripts are release-audit targets: what runs, with
-  which privileges, download verification, install paths.
+- User service only (`packaging/systemd/omatorrent-service.service`,
+  Restart=on-failure; hardening candidates documented in the unit).
+  Phase 0 runs it unprivileged under `user@.service`.
+- Package/install/update scripts are release-audit targets: what runs,
+  with which privileges, download verification, install paths.
 
 ## Review independence [DECISION]
 
-Security review is performed by omatorrent-security-reviewer, which is
-never the implementing agent, and is adversarial: it looks for failure
-paths. High-risk changes and every release require its verdict.
+- Security review is performed by omatorrent-security-reviewer, which is
+  never the implementing agent, and is adversarial: it looks for failure
+  paths. High-risk changes and every release require its verdict.
+  (Phase 0 verdict recorded in docs/agent/PHASE0.md.)

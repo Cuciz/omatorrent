@@ -1,0 +1,133 @@
+# Phase 0 — Technical foundation (record)
+
+Tracking: GitHub issue #1; branch `feat/phase0-foundation`.
+Status: COMPLETE (pending PR review). Date: 2026-09-18.
+
+## Objective (delivered)
+
+Prove the architecture end-to-end with real state only:
+
+```
+Omarchy bar widget (local.omatorrent)
+        ↓ IPC v1 (ADR-0004: NDJSON over Unix socket)
+omatorrent-service (Go daemon, systemd user service)
+        ↓ WebUI API v2 (only qBittorrent-aware component)
+qbittorrent-nox 5.2.3 / WebAPI 2.15.1 (live, read-only)
+```
+
+No full torrent UI was built (non-goal); no mutations were exercised
+against the live backend (non-goal + user's real torrents).
+
+## Reconciliation of prior WIP (2026-09-18)
+
+The pre-existing WIP (docs/IPC.md edit, ADR-0004, earlier PHASE0.md)
+scoped the plugin as inert with hello/health only. The Phase 0 goal was
+widened to a live end-to-end proof, so the WIP was extended — not
+discarded: framing, socket lifecycle and error model kept verbatim;
+added request ids, backend-aware health, system.status, and an active
+QML client. ADR-0004 records the amendment. The old plan's narrower
+non-goals (no qBittorrent adapter, no systemd install) were superseded
+by the task; everything else it forbade (SQLite, VPN, NAS, mutations,
+packaging claims) remains unbuilt.
+
+## Environment (verified live)
+
+| Component | Version | Source |
+|---|---|---|
+| Omarchy | 4.0.4-1 (version file says 4.0.0.alpha; package version is authoritative) | `pacman -Q omarchy` |
+| Quickshell | 0.3.1-1 | `pacman -Q quickshell` |
+| qbittorrent-nox | 5.2.3-3, WebUI 127.0.0.1:8080 (localhost bypass) | `pacman -Q`, `ss -tlnp` |
+| qBittorrent WebAPI | **2.15.1** (live probe; docs/QBITTORRENT.md) | `/api/v2/app/webapiVersion` |
+| Go | 1.27.1 via mise (repo-scoped; pacman `extra/go` recommended permanently — interactive sudo unavailable to the agent) | `go version` |
+| systemd user session | active, XDG_RUNTIME_DIR=/run/user/1000 (0700, uid-owned) | `systemctl --user`, `ls -ld` |
+
+Plugin paths: built-ins `/usr/share/omarchy/shell/plugins/`; user area
+`~/.config/omarchy/plugins/` (installed `local.omatorrent` there).
+Reference components studied: docs/QUICKSHELL.md.
+
+OmaqBT prior art: NOT PRESENT on this machine — nothing inspected or
+claimed. Closest local prior art is `local.networks` (panel doing
+qBittorrent XHR directly from QML — the anti-pattern ADR-0001 forbids;
+documented in docs/QUICKSHELL.md).
+
+## IPC v1 (ADR-0004, docs/IPC.md)
+
+NDJSON chosen over JSON-RPC (lockstep protocol; LF framing maps to
+Quickshell SplitParser). Ops: hello, health (backend ok/unavailable),
+system.status (versions, speeds, torrent count; degraded shape).
+torrent.snapshot deferred to 0.2 with the incremental-sync design.
+Request ids required; error responses never echo payload/ids.
+
+## Evidence matrix (executed 2026-09-18)
+
+### Harness / repo
+| Check | Result |
+|---|---|
+| `python3 tools/validate_harness.py` | PASS (82/82) — before and after changes |
+| `bash tools/test_guard_hook.sh` | PASS (39/39) |
+
+### Daemon (Go) — `cd omatorrent-service`
+| Check | Result |
+|---|---|
+| `go build ./...` | PASS |
+| `go vet ./...` | PASS |
+| `gofmt -l .` | PASS (clean) |
+| `go test -race ./...` | PASS (ipc, qbittorrent, state, config) |
+
+### IPC contract (real sockets, in `go test`)
+hello/handshake; version_mismatch (protocol 2); handshake_required
+(health-first); 10 malformed classes → invalid_message without crash;
+exact-4096 accepted / 4097 → message_too_large; unknown type-only →
+unsupported_message after handshake; second hello rejected; clean
+disconnect; reconnect after orderly restart; stale socket refused;
+client limit (17th closed silently); socket 0600 + dir 0700; unsafe
+parent dirs refused; shutdown closes stalled clients + removes socket
+by identity — **all PASS**.
+
+### qBittorrent adapter (fixtures)
+login success (SID+Referer), bad credentials, ban (403), localhost
+bypass, SID-expiry re-login (exactly one retry), unauthorized without
+creds, decode errors, unreachable, invalid base URL — **all PASS**.
+
+### Live integration (read-only, user's real backend)
+version/WebAPI probes; transfer/info; torrents/info (3 torrents);
+sync/maindata rid=0 snapshot + rid=1 delta behavior; daemon under
+systemd: start → "backend reachable" (v5.2.3/2.15.1) → ot-probe hello/
+health/system.status with real data → SIGTERM/restart clean — **all
+PASS** (outputs in session log; reproducible via docs/DEVELOPMENT.md).
+
+### Shell / plugin
+| Check | Result |
+|---|---|
+| `omarchy plugin validate plugins/local.omatorrent` | PASS (exit 0) |
+| `bash tools/test_quickshell.sh` (isolated `qs` speaking IPC v1) | PASS (hello + ≥2 status responses) |
+| Bar renders live state (`qBT ●` idle; `qBT OFFLINE` daemon-down; reconnects on daemon restart) | PASS — observed via screenshots (docs/screenshots/) |
+| Journal clean (no QML errors with final code) | PASS |
+| Degraded: daemon stopped → widget `qBT OFFLINE`; daemon restarted → auto-reconnect to `qBT ●` | PASS (observed live) |
+| Degraded: qBittorrent unreachable → `qBT ERROR` | PASS (contract + fixture level); NOT observed live — stopping the user's real qbittorrent-nox was out of bounds |
+
+### Security / architecture
+Independent adversarial reviews were run read-only after implementation
+(implementer excluded). Verdicts and findings: recorded below when
+received; CRITICAL/HIGH findings would block the PR.
+
+### Lifecycle quirks discovered (documented in docs/DEVELOPMENT.md)
+- Quickshell `Socket.write` sends no line terminator — append `\n`.
+- Initial `connected: true` doesn't fire `connectionStateChanged` —
+  bootstrap-aware hello required.
+- Instantiated bar widgets can survive plugin rescans with stale code —
+  `omarchy-restart-shell` after edits.
+- SIGKILL leaves a stale socket by design (ADR-0004); next start
+  refuses until operator cleanup.
+
+## Review verdicts
+
+- Security review: PENDING (running at time of writing; filled in the PR).
+- Architecture review: PENDING (running at time of writing; filled in the PR).
+
+## Deferred (by design)
+
+torrent.snapshot + mutations (0.2/0.3 with confirmation flow), SQLite
+(0.8), VPN (0.6), NAS (0.7), remote qBittorrent + TLS + secret provider
+(0.5), CI (0.9), packaging, public plugin namespace, push-based IPC
+updates.

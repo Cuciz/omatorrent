@@ -44,16 +44,36 @@ mutable state.
 
 ## Confirmed environment facts (2026-09-18, this workstation)
 
-- Omarchy 4.0.4 ("Quattro"): the desktop is a single long-lived Quickshell
-  process (`omarchy-shell`); bar/panels/overlays are plugins in it.
-- quickshell 0.3.1 installed.
-- qbittorrent-nox 5.2.3 installed (local backend for development/testing).
+- Omarchy 4.0.4-1 ("Quattro"): the desktop is a single long-lived Quickshell
+  process (`quickshell -n -p /usr/share/omarchy/shell`); bar/panels/
+  overlays are plugins in it. Restart via `omarchy-restart-shell`.
+- quickshell 0.3.1-1 installed.
+- qbittorrent-nox 5.2.3-3 installed; WebAPI **2.15.1** probed live
+  (docs/QBITTORRENT.md). Local dev backend at 127.0.0.1:8080.
+- Go 1.27.1 via mise (repo-scoped; `sudo pacman -S go` recommended
+  permanently — docs/DEVELOPMENT.md).
 - Installed plugin naming convention observed: `author.plugin-name`
-  (e.g. `b.okomart`, `local.networks`).
+  (e.g. `b.okomart`, `local.networks`). OmaTorrent dev ID:
+  `local.omatorrent` (public ID OPEN).
+
+## Phase 0 as-built (2026-09-18)
+
+- Daemon `omatorrent-service/` (Go, single module):
+  `cmd/omatorrent-service` (wiring, signals, slog/JSON),
+  `cmd/ot-probe` (debug IPC client), `internal/ipc` (socket lifecycle +
+  strict protocol), `internal/qbittorrent` (only qBittorrent-aware
+  component; auth/ban classes, SID re-login), `internal/state`
+  (background refresh, backoff 2 s→30 s, snapshot cache),
+  `internal/config` (0600-enforced JSON config, defaults).
+- IPC v1 per ADR-0004 (NDJSON, hello/health/system.status, no
+  mutations). Plugin `plugins/local.omatorrent/` is presentation only
+  (Quickshell.Io Socket + SplitParser, 2 s poll, bounded reconnect).
+- systemd user unit in `packaging/systemd/`; example frames in
+  `contracts/ipc/v1/`.
 
 ## Open questions
 
-- [OPEN] IPC message encoding (JSON lines vs binary) — decided at Phase 1
-  contract design.
 - [OPEN] Metrics/history retention policy.
-- [OPEN] systemd user service unit name and socket path (XDG_RUNTIME_DIR).
+- [OPEN] Public plugin namespace (plugins.omarchy.org).
+- [OPEN] Push vs versioned-poll state delivery for 0.2 (rid-based
+  incremental sync is the qBittorrent-side mechanism either way).

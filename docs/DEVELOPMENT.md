@@ -1,29 +1,55 @@
 # OmaTorrent — Development Environment & Commands
 
-Status: BOOTSTRAP — the repository currently contains the harness and docs
-only. This file is the single source for "which commands to run"; update it
-when tooling is added.
+Status: PHASE 0 IMPLEMENTED. This file is the single source for "which
+commands to run"; update it when tooling changes.
 
-## Current command set (bootstrap phase)
+## Environment facts (verified 2026-09-18, this workstation)
+
+- Arch Linux / Omarchy 4.0.4-1 ("Quattro") / Hyprland; shell process
+  `quickshell -n -p /usr/share/omarchy/shell` (quickshell 0.3.1-1).
+- qbittorrent-nox 5.2.3-3, WebUI 127.0.0.1:8080, WebAPI **2.15.1**,
+  localhost auth bypass on (dev backend; docs/QBITTORRENT.md).
+- Go 1.27.1 via mise, **repo-scoped** (`.mise.toml`) — installed without
+  sudo because interactive sudo was unavailable. The recommended permanent
+  method remains `sudo pacman -S go` (official `extra/go`). Re-run
+  `mise install` in the repo if the toolchain is missing.
+- python3, jq, grim+magick (screenshots) available.
+
+## Command set
 
 | Purpose | Command | State |
 |---|---|---|
 | Harness validation | `python3 tools/validate_harness.py` | AVAILABLE |
-| Guard hook behavior test | `bash tools/test_guard_hook.sh` | AVAILABLE |
-| Go build/test | — | NOT AVAILABLE (no Go module yet; Go toolchain not installed — see ROADMAP Phase 0) |
-| Shell plugin checks | — | NOT AVAILABLE (no product code yet) |
+| Guard hook test | `bash tools/test_guard_hook.sh` | AVAILABLE |
+| Go build | `cd omatorrent-service && go build ./...` | AVAILABLE |
+| Go vet / format | `go vet ./... && gofmt -l .` | AVAILABLE |
+| Go unit + contract tests | `go test -race ./...` | AVAILABLE |
+| Install daemon binary | `go build -o ~/.local/bin/omatorrent-service ./cmd/omatorrent-service` | AVAILABLE |
+| IPC probe (debug CLI) | `go run ./cmd/ot-probe [-count N] [-interval 2s]` | AVAILABLE |
+| Isolated Quickshell↔daemon smoke | `bash tools/test_quickshell.sh` | AVAILABLE |
+| Plugin manifest validation | `omarchy plugin validate plugins/local.omatorrent` | AVAILABLE |
+| Install plugin (dev) | copy `plugins/local.omatorrent/` → `~/.config/omarchy/plugins/` then `omarchy plugin enable local.omatorrent` | AVAILABLE |
+| Service control | `systemctl --user {start,stop,restart,status} omatorrent-service` | AVAILABLE |
+| Service logs | `journalctl --user -u omatorrent-service` | AVAILABLE |
+| Shell restart (purge plugin instances) | `omarchy-restart-shell` | AVAILABLE |
 
-Never claim a NOT AVAILABLE command ran. When Go/QML code lands, their real
-commands (go build / go vet / go test ./..., plugin load checks) get added
-here with their actual invocation.
+Config: `$XDG_CONFIG_HOME/omatorrent/service.json` (optional; JSON, must
+be 0600; missing file → defaults pointing at the local dev backend).
+Socket: `$XDG_RUNTIME_DIR/omatorrent/service.sock`.
 
-## Environment facts (2026-09-18)
+## Known workflow quirks (observed 2026-09-18)
 
-- Arch Linux / Omarchy 4.0.4 / Hyprland workstation (see AGENTS.md user
-  rules: no sudo without need; prefer official packages).
-- python3 3.14, jq 1.8.2, node (via mise) available; **Go NOT installed**.
-- qbittorrent-nox 5.2.3 available locally as the integration backend.
-- quickshell 0.3.1; omarchy-shell is the running desktop shell.
+- Quickshell `Socket.write` does NOT append a line terminator — every IPC
+  frame must be written as `JSON.stringify(msg) + "\n"`.
+- Setting `connected: true` at QML construction time does not fire
+  `connectionStateChanged`; the initial hello must be bootstrap-aware
+  (see plugins/local.omatorrent/BarWidget.qml `ensureSession()`).
+- Editing a plugin file in `~/.config/omarchy/plugins/` triggers a shell
+  rescan, but an already-instantiated bar widget may keep running old
+  code; use `omarchy-restart-shell` after widget edits for a clean state.
+- An unclean daemon kill (SIGKILL) leaves a stale socket by design
+  (ADR-0004); the next start refuses until the operator removes it after
+  confirming no instance runs.
 
 ## Working rules
 
@@ -34,11 +60,9 @@ here with their actual invocation.
 
 ## Git and GitHub
 
-- **Official remote**: GitHub is the official remote repository,
-  https://github.com/Cuciz/omatorrent (public), configured as `origin`
-  (HTTPS via the GitHub CLI credential helper). Local Git remains the
-  working history; GitHub mirrors it and hosts collaboration.
-- **Issues**: durable bugs and feature requests live in GitHub Issues.
+- **Official remote**: https://github.com/Cuciz/omatorrent (public),
+  configured as `origin` (HTTPS via the GitHub CLI credential helper).
+- **Issues**: durable tracking lives in GitHub Issues (Phase 0: #1).
   HANDOFF.md is a session checkpoint, not a bug tracker.
 - **Branches and pull requests**: significant development happens on
   feature branches and lands via pull requests; only trivial changes go
