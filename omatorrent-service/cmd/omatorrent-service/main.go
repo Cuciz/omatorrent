@@ -1,6 +1,7 @@
 // omatorrent-service is the OmaTorrent daemon (ADR-0001/0002): it owns
-// all qBittorrent communication and serves IPC v1 (ADR-0003/0004) on a
-// Unix-domain socket for presentation layers.
+// all qBittorrent communication (incremental sync/maindata since 0.2)
+// and serves IPC v1/v1.1 (ADR-0003/0004/0005) on a Unix-domain socket
+// for presentation layers.
 package main
 
 import (
@@ -17,7 +18,7 @@ import (
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/state"
 )
 
-const version = "0.1.0-phase0"
+const version = "0.2.0-phase02"
 
 func main() {
 	var configPath, socketOverride string
@@ -47,13 +48,14 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 	if err != nil {
 		return err
 	}
-	mgr := state.New(qbt, state.Options{}, log)
+	syncer := state.New(qbt, state.Options{}, log)
 
 	socketPath, err := ipc.ResolveSocketPath(cfg.IPC.SocketPath)
 	if err != nil {
 		return err
 	}
-	srv, err := ipc.New(socketPath, &daemonHandler{mgr: mgr}, log)
+	handler := &daemonHandler{syncer: syncer}
+	srv, err := ipc.New(socketPath, handler, handler, log)
 	if err != nil {
 		return err
 	}
@@ -63,7 +65,7 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
-	go mgr.Run(ctx)
+	go syncer.Run(ctx)
 
 	log.Info("omatorrent-service started",
 		"version", version,
@@ -87,20 +89,64 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 	return nil
 }
 
-// daemonHandler adapts the state manager to the IPC handler interface.
+// daemonHandler adapts the state syncer to the IPC interfaces: v1.0
+// status responses and v1.1 torrent subscriptions.
 type daemonHandler struct {
-	mgr *state.Manager
+	syncer *state.Syncer
 }
 
-func (h *daemonHandler) Health() bool { return h.mgr.Health() }
+func (h *daemonHandler) Health() bool { return h.syncer.Health() }
 
 func (h *daemonHandler) StatusData() (ipc.StatusData, bool) {
-	snap := h.mgr.Snapshot()
+	st := h.syncer.State()
 	return ipc.StatusData{
-		AppVersion:    snap.AppVersion,
-		WebAPIVersion: snap.WebAPIVersion,
-		DlSpeed:       snap.DlSpeed,
-		UpSpeed:       snap.UpSpeed,
-		TorrentsTotal: snap.TorrentsTotal,
-	}, snap.QBittorrentOK
+		AppVersion:    st.AppVersion,
+		WebAPIVersion: st.WebAPIVersion,
+		DlSpeed:       st.DlSpeed,
+		UpSpeed:       st.UpSpeed,
+		TorrentsTotal: len(st.Torrents),
+	}, st.BackendOK
+}
+
+// Subscribe implements ipc.Subscriptions from the syncer's committed
+// state and change events. Forwarding is bounded: a slow IPC consumer
+// is dropped (closed channel) per the ADR-0005 slow-consumer rule.
+func (h *daemonHandler) Subscribe() (bool, []ipc.TorrentItem, <-chan ipc.DeltaEvent, func()) {
+	st, events, cancel := h.syncer.Subscribe()
+	items := make([]ipc.TorrentItem, 0, len(st.Torrents))
+	for _, t := range st.Torrents {
+		items = append(items, toItem(t))
+	}
+	ch := make(chan ipc.DeltaEvent, 16)
+	go func() {
+		defer close(ch)
+		for ev := range events {
+			out := ipc.DeltaEvent{Seq: ev.Seq, Removed: ev.Removed}
+			for _, t := range ev.Changed {
+				out.Changed = append(out.Changed, toItem(t))
+			}
+			select {
+			case ch <- out:
+			default:
+				return // consumer too slow; drop the subscription
+			}
+		}
+	}()
+	return st.BackendOK, items, ch, cancel
+}
+
+func toItem(t state.Torrent) ipc.TorrentItem {
+	return ipc.TorrentItem{
+		Hash:      t.Hash,
+		Name:      t.Name,
+		State:     t.State,
+		Progress:  t.Progress,
+		DlSpeed:   t.DlSpeed,
+		UpSpeed:   t.UpSpeed,
+		Eta:       t.Eta,
+		Ratio:     t.Ratio,
+		Category:  t.Category,
+		Size:      t.Size,
+		Completed: t.Completed,
+	}
 }

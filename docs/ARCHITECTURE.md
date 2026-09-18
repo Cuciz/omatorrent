@@ -56,6 +56,28 @@ mutable state.
   (e.g. `b.okomart`, `local.networks`). OmaTorrent dev ID:
   `local.omatorrent` (public ID OPEN).
 
+## Phase 0.2 as-built (2026-09-18)
+
+- Daemon state: `internal/state.Syncer` owns the sync/maindata loop —
+  rid, full_update rebuilds, partial-field delta merges,
+  torrents_removed, session/rid-reset recovery, last-known-good on
+  malformed payloads, generation-numbered committed states, and change
+  events for subscribers. The adapter (`internal/qbittorrent`) keeps an
+  HTTP cookie jar so the bypass-issued session (and with it the rid)
+  survives across calls (docs/QBITTORRENT.md). torrents/info polling is
+  gone: system.status speeds/count come from the sync cache.
+- IPC v1.1 (ADR-0005): `torrent.subscribe` → subscribed + bounded
+  snapshot frames (begin/item/end) + `torrent.delta` pushes (seq'd,
+  chunked ≤ 4096 B, slow consumers disconnected via a 256-frame queue);
+  v1.0 shapes untouched. Server writes are serialized per connection
+  through one writer goroutine.
+- Panel `plugins/local.omatorrent/Panel.qml`: native popout
+  (Ui.Panel + KeyboardPanel + PanelKeyCatcher, first-party clock
+  pattern), header (backend state + speeds via system.status poll),
+  filters, dense read-only rows with progress tracks; incremental view
+  updates (in-place row set; rebuild only on membership/order change).
+  Bar widget unchanged in role; click toggles the panel.
+
 ## Phase 0 as-built (2026-09-18)
 
 - Daemon `omatorrent-service/` (Go, single module):

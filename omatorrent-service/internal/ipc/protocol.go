@@ -83,6 +83,134 @@ type errorResponse struct {
 	Code     string `json:"code"`
 }
 
+// ---- v1.1 torrent state delivery (ADR-0005) ----
+
+// TorrentItem is the normalized torrent wire item (exact key set,
+// identical in snapshot items and deltas). Name is capped at
+// nameCapRunes runes by the encoder — the frame budget rule.
+type TorrentItem struct {
+	Hash      string  `json:"hash"`
+	Name      string  `json:"name"`
+	State     string  `json:"state"`
+	Progress  float64 `json:"progress"`
+	DlSpeed   int64   `json:"dlspeed"`
+	UpSpeed   int64   `json:"upspeed"`
+	Eta       int64   `json:"eta"`
+	Ratio     float64 `json:"ratio"`
+	Category  string  `json:"category"`
+	Size      int64   `json:"size"`
+	Completed int64   `json:"completed"`
+}
+
+// NameCapRunes bounds torrent names on the wire (ADR-0005).
+const NameCapRunes = 512
+
+type subscribedResponse struct {
+	Type     string `json:"type"`
+	Protocol int64  `json:"protocol"`
+	ID       int64  `json:"id"`
+}
+
+type snapshotBeginResponse struct {
+	Type     string `json:"type"`
+	Protocol int64  `json:"protocol"`
+	ID       int64  `json:"id"`
+	Count    int    `json:"count"`
+}
+
+type snapshotItemResponse struct {
+	Type     string      `json:"type"`
+	Protocol int64       `json:"protocol"`
+	ID       int64       `json:"id"`
+	Index    int         `json:"index"`
+	Torrent  TorrentItem `json:"torrent"`
+}
+
+type snapshotEndResponse struct {
+	Type     string `json:"type"`
+	Protocol int64  `json:"protocol"`
+	ID       int64  `json:"id"`
+}
+
+type deltaResponse struct {
+	Type     string        `json:"type"`
+	Protocol int64         `json:"protocol"`
+	Seq      uint64        `json:"seq"`
+	Changed  []TorrentItem `json:"changed"`
+	Removed  []string      `json:"removed"`
+}
+
+// DeltaEvent is one committed change from the state source.
+type DeltaEvent struct {
+	Seq     uint64
+	Changed []TorrentItem
+	Removed []string
+}
+
+// CapName truncates a torrent name to the wire cap, marking truncation.
+func CapName(name string) string {
+	runes := []rune(name)
+	if len(runes) <= NameCapRunes {
+		return name
+	}
+	return string(runes[:NameCapRunes-1]) + "…"
+}
+
+func EncodeSubscribed(id int64) []byte {
+	return mustMarshal(subscribedResponse{"torrent.subscribed", ProtocolVersion, id})
+}
+
+func EncodeSnapshotBegin(id int64, count int) []byte {
+	return mustMarshal(snapshotBeginResponse{"torrent.snapshot.begin", ProtocolVersion, id, count})
+}
+
+func EncodeSnapshotItem(id int64, index int, t TorrentItem) []byte {
+	t.Name = CapName(t.Name)
+	return mustMarshal(snapshotItemResponse{"torrent.snapshot.item", ProtocolVersion, id, index, t})
+}
+
+func EncodeSnapshotEnd(id int64) []byte {
+	return mustMarshal(snapshotEndResponse{"torrent.snapshot.end", ProtocolVersion, id})
+}
+
+// EncodeDeltas splits one change event into as many delta frames as the
+// byte budget requires (all sharing seq; bounded per frame).
+func EncodeDeltas(ev DeltaEvent) [][]byte {
+	const budget = 3800 // headroom under MaxFrame for JSON overhead
+	var out [][]byte
+	var changed []TorrentItem
+	var removed []string
+	flush := func() {
+		if len(changed) == 0 && len(removed) == 0 {
+			changed, removed = nil, nil
+			return
+		}
+		out = append(out, mustMarshal(deltaResponse{"torrent.delta", ProtocolVersion, ev.Seq, changed, removed}))
+		changed, removed = nil, nil
+	}
+	size := 0
+	for _, t := range ev.Changed {
+		t.Name = CapName(t.Name)
+		b, _ := json.Marshal(t)
+		if size+len(b) > budget && (len(changed) > 0 || len(removed) > 0) {
+			flush()
+			size = 0
+		}
+		changed = append(changed, t)
+		size += len(b)
+	}
+	for _, h := range ev.Removed {
+		if size+len(h)+16 > budget && (len(changed) > 0 || len(removed) > 0) {
+			flush()
+			size = 0
+		}
+		removed = append(removed, h)
+		size += len(h) + 16
+	}
+	flush()
+	return out
+}
+
 // EncodeHello, EncodeHealth, EncodeStatus, EncodeError produce response
 // frames (without the trailing LF).
 
@@ -251,7 +379,7 @@ func parseFrame(frame []byte) (Request, error) {
 		if !hasProtocol || hasID {
 			return Request{}, errInvalid
 		}
-	case "health", "system.status":
+	case "health", "system.status", "torrent.subscribe":
 		if !hasID || hasProtocol {
 			return Request{}, errInvalid
 		}

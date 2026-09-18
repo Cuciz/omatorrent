@@ -1,8 +1,8 @@
 # OmaTorrent — IPC Contract v1
 
-Status: Phase 0 contract, ADR-0004. Read-only; no mutations, no secrets.
-Encoding: newline-delimited JSON (NDJSON) — see ADR-0004 for the choice
-vs JSON-RPC/binary framing.
+Status: v1 (ADR-0004) + v1.1 extension (ADR-0005, read-only torrent
+state). No mutations, no secrets. Encoding: newline-delimited JSON
+(NDJSON) — see ADR-0004 for the choice vs JSON-RPC/binary framing.
 
 ## Transport and framing
 
@@ -29,9 +29,11 @@ including LF**. JSON whitespace is allowed; no unknown fields, duplicate
 keys, trailing JSON, arrays/null as messages or invalid field types. Keys
 are case-sensitive. No payload content is logged or reflected in errors.
 
-Protocol is an integer major version; only 1 is accepted. No minor version
-negotiation exists yet. A future extension needs a reviewed compatibility
-plan rather than adding fields to this strict grammar.
+Protocol is an integer major version; only 1 is accepted. The v1.1
+extension (ADR-0005) adds new message types only — it never adds fields
+to existing shapes, so strict v1 clients are unaffected. A future
+incompatible extension needs a reviewed compatibility plan rather than
+adding fields to existing shapes.
 
 ## Messages
 
@@ -92,6 +94,64 @@ than 1 Hz. `torrent.snapshot` (full torrent list) is deliberately
 deferred to 0.2 with the incremental-sync design; adding it requires a
 reviewed v1.x extension.
 
+## v1.1 extension: torrent state subscription (ADR-0005)
+
+Read-only. Subscriptions deliver the daemon's normalized torrent state;
+qBittorrent states, rids and merge semantics never cross this boundary.
+
+### Subscribe (after hello; exact two keys, like health)
+
+```json
+{"type":"torrent.subscribe","id":3}
+```
+Response:
+```json
+{"type":"torrent.subscribed","protocol":1,"id":3}
+```
+Then, immediately, the full state as bounded frames (each ≤ 4096 bytes
+incl. LF; ordering guaranteed per connection):
+```json
+{"type":"torrent.snapshot.begin","protocol":1,"id":3,"count":2}
+{"type":"torrent.snapshot.item","protocol":1,"id":3,"index":0,"torrent":{"hash":"…40 hex…","name":"…","state":"seeding","progress":1,"dlspeed":0,"upspeed":51200,"eta":8640000,"ratio":2.1,"category":"","size":1048576,"completed":1048576}}
+{"type":"torrent.snapshot.item","protocol":1,"id":3,"index":1,"torrent":{…}}
+{"type":"torrent.snapshot.end","protocol":1,"id":3}
+```
+Thereafter, on each daemon state change:
+```json
+{"type":"torrent.delta","protocol":1,"seq":7,"changed":[{…torrent…}],"removed":["…hash…"]}
+```
+Large changes are split into multiple `torrent.delta` frames sharing the
+same `seq`; clients apply each frame's `changed`/`removed` as it
+arrives. `seq` is strictly increasing per subscription.
+
+### Normalized torrent item (exact key set; identical everywhere it appears)
+
+| Key | Type | Meaning |
+|---|---|---|
+| hash | string | 40 hex chars |
+| name | string | capped at 512 UTF-8 runes by the daemon |
+| state | string | downloading, seeding, paused, queued, checking, error, moving, other |
+| progress | number | 0..1 |
+| dlspeed / upspeed | integer | bytes/second |
+| eta | integer | seconds; 8640000 = unknown/infinite |
+| ratio | number | ≥ 0 |
+| category | string | may be empty |
+| size / completed | integer | bytes |
+
+### Lifecycle
+
+- One subscription per connection; it ends when the connection closes.
+- Every (re)subscription starts with a fresh full snapshot under its own
+  id; stale frames cannot survive a reconnect.
+- Per-subscriber server-side queue is bounded (256 frames); overflow or
+  an unwritable subscriber (5 s write deadline exceeded) closes the
+  connection — the client re-handshakes, re-subscribes, rebuilds.
+- While subscribed, the v1.0 requests (health/system.status) remain
+  available on the same connection.
+- The daemon pushes only committed state: a snapshot or delta is never
+  emitted mid-merge; a backend anomaly discards the partial cycle
+  (last-known-good) so clients never see corrupt state.
+
 ## Errors and resource limits
 
 Response shape (then connection closes):
@@ -105,7 +165,7 @@ Response shape (then connection closes):
 | message_too_large | Frame cannot fit in 4096 bytes including LF |
 | handshake_required | A valid message other than hello arrives first |
 | version_mismatch | First hello has an integer protocol other than 1 |
-| unsupported_message | After hello, a valid message type other than health/system.status, including another hello |
+| unsupported_message | After hello, a valid message type other than health/system.status/torrent.subscribe, including another hello |
 
 Unknown message types use the type-only shape; adding other fields is
 invalid_message. A hello never carries an id; health/system.status always

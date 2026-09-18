@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -47,7 +48,7 @@ func startServer(t *testing.T, h Handler) (*Server, string) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, h, nil)
+	srv, err := New(path, h, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -342,7 +343,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
 
-	srv1, err := New(path, &fakeHandler{health: true}, nil)
+	srv1, err := New(path, &fakeHandler{health: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +360,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	}
 
 	// Restart: a fresh server can bind and the client handshakes again.
-	srv2, err := New(path, &fakeHandler{health: true}, nil)
+	srv2, err := New(path, &fakeHandler{health: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +398,7 @@ func TestStaleSocketRefused(t *testing.T) {
 	}
 	f.Close()
 
-	srv, err := New(path, &fakeHandler{}, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +433,7 @@ func TestStaleSocketRecovered(t *testing.T) {
 	path := filepath.Join(dir, "service.sock")
 	makeStaleSocket(t, path)
 
-	srv, err := New(path, &fakeHandler{health: true}, nil)
+	srv, err := New(path, &fakeHandler{health: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +474,7 @@ func waitDialable(t *testing.T, path string) *client {
 func TestActiveDaemonRefused(t *testing.T) {
 	_, path := startServer(t, &fakeHandler{health: true}) // live daemon
 
-	srv2, err := New(path, &fakeHandler{}, nil)
+	srv2, err := New(path, &fakeHandler{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +491,7 @@ func TestStaleSocketWrongPermsRefused(t *testing.T) {
 	makeStaleSocket(t, path)
 	os.Chmod(path, 0o666)
 
-	srv, err := New(path, &fakeHandler{}, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +512,7 @@ func TestSocketSymlinkRefused(t *testing.T) {
 	path := filepath.Join(dir, "service.sock")
 	os.Symlink(real, path)
 
-	srv, err := New(path, &fakeHandler{}, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +530,7 @@ func TestShutdownLeavesReplacedSocket(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, &fakeHandler{health: true}, nil)
+	srv, err := New(path, &fakeHandler{health: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +581,7 @@ func TestHangingListenerRefused(t *testing.T) {
 		}
 	}()
 
-	srv, err := New(path, &fakeHandler{}, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +620,7 @@ func TestSocketPermissions(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, &fakeHandler{}, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +656,7 @@ func TestShutdownClosesActiveClients(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, &fakeHandler{health: true}, nil)
+	srv, err := New(path, &fakeHandler{health: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,4 +695,234 @@ func TestDaemonUnavailableRenderPath(t *testing.T) {
 	if got := c.recv(); !strings.Contains(got, `"qbittorrent":"unavailable"`) {
 		t.Fatalf("status = %s", got)
 	}
+}
+
+// ---- v1.1 subscription contract tests (ADR-0005) ----
+
+type fakeSubs struct {
+	mu     sync.Mutex
+	items  []TorrentItem
+	events chan DeltaEvent
+}
+
+func (f *fakeSubs) Subscribe() (bool, []TorrentItem, <-chan DeltaEvent, func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.events == nil {
+		f.events = make(chan DeltaEvent, 8)
+	}
+	items := make([]TorrentItem, len(f.items))
+	copy(items, f.items)
+	cancel := func() {}
+	return true, items, f.events, cancel
+}
+
+func startSubServer(t *testing.T, subs Subscriptions) (*fakeSubs, string) {
+	t.Helper()
+	fs := subs.(*fakeSubs)
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	path := filepath.Join(dir, "service.sock")
+	srv, err := New(path, &fakeHandler{health: true}, fs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		if err := srv.Serve(); err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	}()
+	waitForSocket(t, path)
+	t.Cleanup(srv.Close)
+	return fs, path
+}
+
+func (c *client) recvRaw() []string {
+	c.t.Helper()
+	var lines []string
+	for {
+		c.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		line, err := c.r.ReadString('\n')
+		if err != nil {
+			return lines
+		}
+		lines = append(lines, strings.TrimSuffix(line, "\n"))
+	}
+}
+
+func TestSubscriptionSnapshotAndDelta(t *testing.T) {
+	subs := &fakeSubs{items: []TorrentItem{
+		{Hash: "aa", Name: "Zeta", State: "seeding"},
+		{Hash: "bb", Name: "Alpha", State: "downloading", Progress: 0.5},
+	}}
+	_, path := startSubServer(t, subs)
+
+	c := dial(t, path)
+	c.handshake()
+	c.send(`{"type":"torrent.subscribe","id":7}`)
+	c.send(`{"type":"torrent.subscribe","id":8}`) // second subscribe → unsupported
+	lines := c.recvRaw()
+
+	var sawSubscribed, sawBegin, sawEnd, sawSecond bool
+	var items int
+	for _, l := range lines {
+		switch {
+		case l == `{"type":"torrent.subscribed","protocol":1,"id":7}`:
+			sawSubscribed = true
+		case l == `{"type":"torrent.snapshot.begin","protocol":1,"id":7,"count":2}`:
+			sawBegin = true
+		case strings.HasPrefix(l, `{"type":"torrent.snapshot.item","protocol":1,"id":7,"index":`):
+			items++
+		case l == `{"type":"torrent.snapshot.end","protocol":1,"id":7}`:
+			sawEnd = true
+		case l == `{"type":"torrent.subscribed","protocol":1,"id":8}`:
+			sawSecond = true
+		}
+	}
+	if !sawSubscribed || !sawBegin || !sawEnd || items != 2 || sawSecond {
+		t.Fatalf("subscription frames: subscribed=%v begin=%v end=%v items=%d secondAccepted=%v lines=%v",
+			sawSubscribed, sawBegin, sawEnd, items, sawSecond, lines)
+	}
+	// Wire order is sorted by name: Alpha before Zeta.
+	if !strings.Contains(lines[3], `"name":"Alpha"`) {
+		t.Fatalf("snapshot not name-sorted: %v", lines)
+	}
+
+	// Push a delta; it must arrive as one frame.
+	subs.events <- DeltaEvent{Seq: 5, Changed: []TorrentItem{{Hash: "bb", Name: "Alpha", State: "downloading", DlSpeed: 42}}, Removed: []string{"aa"}}
+	lines = c.recvRaw()
+	found := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, `{"type":"torrent.delta","protocol":1,"seq":5,"changed":[`) &&
+			strings.Contains(l, `"dlspeed":42`) && strings.Contains(l, `"removed":["aa"]`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("delta frame not received: %v", lines)
+	}
+
+	// v1.0 requests still work on the subscribed connection.
+	c.send(`{"type":"health","id":9}`)
+	lines = c.recvRaw()
+	ok := false
+	for _, l := range lines {
+		if strings.Contains(l, `"backend":"ok"`) {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatalf("health on subscribed connection failed: %v", lines)
+	}
+}
+
+func TestSubscriptionInvalidSchema(t *testing.T) {
+	_, path := startSubServer(t, &fakeSubs{})
+	c := dial(t, path)
+	c.handshake()
+	c.send(`{"type":"torrent.subscribe"}`) // missing id
+	if got := errCode(t, c.recv()); got != "invalid_message" {
+		t.Fatalf("code = %s", got)
+	}
+}
+
+func TestSubscriptionReconnectResubscribe(t *testing.T) {
+	subs := &fakeSubs{items: []TorrentItem{{Hash: "aa", Name: "Only", State: "paused"}}}
+	_, path := startSubServer(t, subs)
+
+	c1 := dial(t, path)
+	c1.handshake()
+	c1.send(`{"type":"torrent.subscribe","id":1}`)
+	lines := c1.recvRaw()
+	if len(lines) != 4 { // subscribed + begin + 1 item + end
+		t.Fatalf("first subscription frames = %v", lines)
+	}
+	c1.conn.Close()
+
+	// Reconnect: fresh handshake + fresh full snapshot.
+	c2 := dial(t, path)
+	c2.handshake()
+	c2.send(`{"type":"torrent.subscribe","id":2}`)
+	lines = c2.recvRaw()
+	if len(lines) != 4 || !strings.Contains(lines[2], `"name":"Only"`) {
+		t.Fatalf("resubscription frames = %v", lines)
+	}
+}
+
+// Big deltas are split into bounded frames sharing one seq.
+func TestDeltaChunking(t *testing.T) {
+	ev := DeltaEvent{Seq: 9}
+	for i := 0; i < 60; i++ {
+		name := strings.Repeat("n", 200) + string(rune('a'+i%26))
+		ev.Changed = append(ev.Changed, TorrentItem{Hash: fmt.Sprintf("%040d", i), Name: name, State: "downloading"})
+	}
+	frames := EncodeDeltas(ev)
+	if len(frames) < 2 {
+		t.Fatalf("expected chunking, got %d frames", len(frames))
+	}
+	for i, f := range frames {
+		if len(f)+1 > MaxFrame {
+			t.Fatalf("frame %d exceeds budget: %d bytes", i, len(f)+1)
+		}
+		if !strings.HasPrefix(string(f), `{"type":"torrent.delta","protocol":1,"seq":9,`) {
+			t.Fatalf("frame %d wrong prefix: %s", i, f[:60])
+		}
+	}
+	total := 0
+	for _, f := range frames {
+		var d deltaResponse
+		if err := json.Unmarshal(f, &d); err != nil {
+			t.Fatalf("chunk decode: %v", err)
+		}
+		total += len(d.Changed)
+	}
+	if total != 60 {
+		t.Fatalf("chunks carried %d torrents, want 60", total)
+	}
+}
+
+// Name cap: wire items never exceed NameCapRunes runes.
+func TestNameCap(t *testing.T) {
+	long := strings.Repeat("x", 2000)
+	item := TorrentItem{Hash: "aa", Name: long, State: "paused"}
+	frame := EncodeSnapshotItem(1, 0, item)
+	if len(frame)+1 > MaxFrame {
+		t.Fatalf("capped item exceeds frame budget: %d", len(frame)+1)
+	}
+	var got snapshotItemResponse
+	if err := json.Unmarshal(frame, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(got.Torrent.Name)) != NameCapRunes {
+		t.Fatalf("name runes = %d", len([]rune(got.Torrent.Name)))
+	}
+}
+
+// Slow consumers are disconnected rather than growing daemon memory.
+func TestSlowSubscriberDisconnected(t *testing.T) {
+	subs := &fakeSubs{items: nil}
+	_, path := startSubServer(t, subs)
+	c := dial(t, path)
+	c.handshake()
+	c.send(`{"type":"torrent.subscribe","id":1}`)
+	c.recvRaw() // drain snapshot
+
+	// Do not read; push far more than the queue capacity.
+	for i := 0; i < outQueue+50; i++ {
+		select {
+		case subs.events <- DeltaEvent{Seq: uint64(i), Changed: []TorrentItem{{Hash: "aa", Name: "n", State: "paused"}}}:
+		default:
+			// channel full: server may already be tearing down
+		}
+	}
+	// The connection must eventually close.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		buf := make([]byte, 1<<16)
+		if _, err := c.r.Read(buf); err != nil {
+			return // closed
+		}
+	}
+	t.Fatal("slow subscriber was not disconnected")
 }

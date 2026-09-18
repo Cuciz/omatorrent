@@ -4,13 +4,16 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// OmaTorrent Phase 0 bar proof: presentation only (ADR-0001). All state
-// comes from omatorrent-service over IPC v1 (ADR-0004) via a Unix socket;
+// OmaTorrent bar widget: presentation only (ADR-0001). All state comes
+// from omatorrent-service over IPC v1 (ADR-0004/0005) via a Unix socket;
 // no qBittorrent HTTP, no secrets, no business logic here.
 //
 // Client discipline (docs/IPC.md): exactly one request in flight per
 // connection; responses are matched by id; a response with an
 // unexpected id is ignored; pending state resets on disconnect.
+//
+// Clicking opens the torrent panel (the native Omarchy popout pattern,
+// same as the first-party clock/moon-phase widgets).
 BarWidget {
   id: root
   moduleName: "local.omatorrent"
@@ -87,8 +90,6 @@ BarWidget {
     if (!msg || typeof msg.type !== "string") return
     switch (msg.type) {
       case "hello":
-        // system.status already carries backend reachability; no separate
-        // health request is needed for the proof.
         requestStatus()
         break
       case "system.status":
@@ -146,8 +147,32 @@ BarWidget {
     }
   }
 
+  // ---- Torrent panel (native popout; shape contract for
+  //      shell.summon/hide/toggle routing).
+  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+
+  function open() {
+    if (panelLoader.item) panelLoader.item.open()
+  }
+  function close() {
+    if (panelLoader.item) panelLoader.item.close()
+  }
+  function toggle() {
+    if (panelLoader.item) panelLoader.item.toggle()
+  }
+
+  function injectPanel() {
+    var target = panelLoader.item
+    if (!target) return
+    if ("bar" in target) target.bar = root.bar
+    if ("anchorItem" in target) target.anchorItem = button
+    if ("hostWidget" in target) target.hostWidget = root
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  onBarChanged: injectPanel()
 
   Socket {
     id: sock
@@ -212,6 +237,17 @@ BarWidget {
 
   Component.onCompleted: if (root.socketPath !== "") sock.connected = true
 
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("Panel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
@@ -221,6 +257,8 @@ BarWidget {
     labelVisible: true
     hasVisualContent: true
     tooltipText: root.tooltip
+    onPressed: root.toggle()
+
     implicitWidth: vertical ? barSize : textMetrics.implicitWidth + scaledHorizontalMargin * 2
     implicitHeight: vertical ? barSize : Math.max(barSize, textMetrics.implicitHeight + scaledVerticalPadding * 2)
 

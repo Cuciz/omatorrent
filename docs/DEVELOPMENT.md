@@ -26,7 +26,8 @@ commands to run"; update it when tooling changes.
 | Go unit + contract tests | `go test -race ./...` | AVAILABLE |
 | Install daemon binary | `go build -o ~/.local/bin/omatorrent-service ./cmd/omatorrent-service` | AVAILABLE |
 | IPC probe (debug CLI) | `go run ./cmd/ot-probe [-count N] [-interval 2s]` | AVAILABLE |
-| Isolated Quickshell↔daemon smoke | `bash tools/test_quickshell.sh` | AVAILABLE |
+| Isolated Quickshell↔daemon smoke (v1.0 + v1.1 subscription) | `bash tools/test_quickshell.sh` | AVAILABLE |
+| Benchmarks (10/100/1000 torrents) | `cd omatorrent-service && go test -bench . -benchmem -run XXX ./internal/state/` | AVAILABLE |
 | Plugin manifest validation | `omarchy plugin validate plugins/local.omatorrent` | AVAILABLE |
 | Install plugin (dev) | copy `plugins/local.omatorrent/` → `~/.config/omarchy/plugins/` then `omarchy plugin enable local.omatorrent` | AVAILABLE |
 | Service control | `systemctl --user {start,stop,restart,status} omatorrent-service` | AVAILABLE |
