@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -362,5 +363,58 @@ func TestStateNeverContactsBackendBeforeRun(t *testing.T) {
 	}
 	if fb.calls != 0 {
 		t.Fatalf("backend contacted %d times before Run", fb.calls)
+	}
+}
+
+// Bad hashes (too long / wrong charset) are malformed payloads: the
+// cycle is discarded and last-known-good preserved — uncapped backend
+// strings must never reach the IPC frame budget.
+func TestSyncBadHashRejectedPreservesLKG(t *testing.T) {
+	fb := &fakeBackend{resps: []qbittorrent.Maindata{full(2, "downloading")}}
+	s := New(fb, Options{}, quietLogger())
+	s.cycle(context.Background(), time.Second)
+
+	long := string(make([]byte, 0)) + "zz" + string(make([]rune, 4096))
+	fb.resps = append(fb.resps, qbittorrent.Maindata{
+		RID:      2,
+		Torrents: map[string]json.RawMessage{long: json.RawMessage(`{"name":"x"}`)},
+	})
+	if s.cycle(context.Background(), time.Second) {
+		t.Fatal("oversized hash accepted")
+	}
+	st := s.State()
+	if len(st.Torrents) != 2 || st.BackendOK {
+		t.Fatalf("LKG not preserved: %+v", st)
+	}
+
+	// v1 (40 hex) and v2 (64 hex) hashes are both valid.
+	fb.resps = append(fb.resps, qbittorrent.Maindata{
+		RID: 3,
+		Torrents: map[string]json.RawMessage{
+			"0123456789abcdef0123456789abcdef01234567":                         json.RawMessage(`{"name":"v1"}`),
+			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": json.RawMessage(`{"name":"v2"}`),
+		},
+	})
+	if !s.cycle(context.Background(), time.Second) {
+		t.Fatal("valid v1/v2 hashes rejected")
+	}
+}
+
+// Categories are capped on the normalized model (wire budget defense).
+func TestCategoryCapped(t *testing.T) {
+	long := strings.Repeat("c", 2000)
+	fb := &fakeBackend{resps: []qbittorrent.Maindata{{
+		RID: 1, FullUpdate: true,
+		Torrents: map[string]json.RawMessage{
+			mkHash(0): json.RawMessage(`{"name":"A","category":"` + long + `"}`),
+		},
+	}}}
+	s := New(fb, Options{}, quietLogger())
+	if !s.cycle(context.Background(), time.Second) {
+		t.Fatal("cycle failed")
+	}
+	got := s.State().Torrents[mkHash(0)].Category
+	if len([]rune(got)) != CategoryCapRunes {
+		t.Fatalf("category runes = %d, want %d", len([]rune(got)), CategoryCapRunes)
 	}
 }

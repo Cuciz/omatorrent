@@ -34,9 +34,10 @@ Panel {
   // ---- Torrent state (v1.1 subscription).
   property var torrents: ({})        // hash -> item object
   property var order: []             // hashes, sorted by name
+  property var rowIndex: ({})        // hash -> visible row (valid between rebuilds)
   property string filter: "all"
   property bool subscribed: false
-  property var subId: null
+  property bool applyingSnapshot: false
 
   readonly property string xdgRuntime: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string socketPath: xdgRuntime !== "" ? xdgRuntime + "/omatorrent/service.sock" : ""
@@ -106,19 +107,25 @@ Panel {
     order.splice(lo, 0, hash)
   }
 
+  function validItem(item) {
+    return item && typeof item.hash === "string" && item.hash.length > 0 && item.hash.length <= 64
+  }
+
   function applyItem(item) {
+    if (!validItem(item)) return // malformed daemon data never reaches the model
     const isNew = torrents[item.hash] === undefined
     torrents[item.hash] = item
     if (isNew) insertSorted(item.hash, item)
+    if (applyingSnapshot) return // batched: one rebuild at snapshot end
     syncRow(item.hash, item, isNew)
   }
 
   function applyRemoved(hash) {
-    if (torrents[hash] === undefined) return
+    if (typeof hash !== "string" || torrents[hash] === undefined) return
     delete torrents[hash]
     const i = order.indexOf(hash)
     if (i >= 0) order.splice(i, 1)
-    syncRemove(hash)
+    if (!applyingSnapshot) rebuildView()
   }
 
   // ---- View sync: membership or order change rebuilds the view; a
@@ -137,20 +144,20 @@ Panel {
 
   function rebuildView() {
     view.clear()
+    rowIndex = ({})
     for (let i = 0; i < order.length; i++) {
       const t = torrents[order[i]]
-      if (matchesFilter(t)) view.append(row(t))
+      if (matchesFilter(t)) {
+        rowIndex[t.hash] = view.count
+        view.append(row(t))
+      }
     }
   }
 
   function viewIndex(hash) {
-    const t = torrents[hash]
-    if (t === undefined) return -1
-    for (let i = 0; i < view.count; i++) {
-      const r = view.get(i)
-      if (r.hash === hash) return i
-    }
-    return -1
+    const i = rowIndex[hash]
+    if (i === undefined || i >= view.count || view.get(i).hash !== hash) return -1
+    return i
   }
 
   function row(t) {
@@ -167,19 +174,14 @@ Panel {
   }
 
   function syncRow(hash, item, isNew) {
-    const inView = matchesFilter(item)
-    if (!isNew && inView) {
+    if (!isNew && matchesFilter(item)) {
       const i = viewIndex(hash)
       if (i >= 0) {
         view.set(i, row(item))
         return
       }
     }
-    rebuildView()
-  }
-
-  function syncRemove(hash) {
-    rebuildView()
+    rebuildView() // membership or order changed
   }
 
   function handleLine(line) {
@@ -194,11 +196,6 @@ Panel {
     switch (msg.type) {
       case "hello":
         requestStatus()
-        if (!subscribed) {
-          subscribed = true
-          subId = nextId
-          send({ type: "torrent.subscribe", id: nextId++ })
-        }
         break
       case "system.status":
         if (typeof msg.id !== "number" || msg.id !== pendingId) return
@@ -207,8 +204,15 @@ Panel {
         backendOk = msg.qbittorrent === "ok"
         dlSpeed = msg.dl_speed || 0
         upSpeed = msg.up_speed || 0
+        // Subscribe only after the first status completed: exactly one
+        // request in flight at any time (docs/IPC.md client rules).
+        if (!subscribed) {
+          subscribed = true
+          send({ type: "torrent.subscribe", id: nextId++ })
+        }
         break
       case "torrent.snapshot.begin":
+        applyingSnapshot = true
         clearTorrents()
         break
       case "torrent.snapshot.item":
@@ -225,8 +229,11 @@ Panel {
         }
         break
       case "torrent.subscribed":
-      case "torrent.snapshot.end":
       case "error":
+        break
+      case "torrent.snapshot.end":
+        applyingSnapshot = false
+        rebuildView() // single O(N) pass for the whole snapshot
         break
     }
   }

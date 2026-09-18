@@ -164,34 +164,36 @@ func EncodeSnapshotBegin(id int64, count int) []byte {
 	return mustMarshal(snapshotBeginResponse{"torrent.snapshot.begin", ProtocolVersion, id, count})
 }
 
-func EncodeSnapshotItem(id int64, index int, t TorrentItem) []byte {
-	t.Name = CapName(t.Name)
-	return mustMarshal(snapshotItemResponse{"torrent.snapshot.item", ProtocolVersion, id, index, t})
-}
-
 func EncodeSnapshotEnd(id int64) []byte {
 	return mustMarshal(snapshotEndResponse{"torrent.snapshot.end", ProtocolVersion, id})
 }
 
 // EncodeDeltas splits one change event into as many delta frames as the
-// byte budget requires (all sharing seq; bounded per frame).
+// byte budget requires (all sharing seq; bounded per frame). Lists are
+// always JSON arrays, never null.
 func EncodeDeltas(ev DeltaEvent) [][]byte {
 	const budget = 3800 // headroom under MaxFrame for JSON overhead
 	var out [][]byte
-	var changed []TorrentItem
-	var removed []string
+	changed := make([]TorrentItem, 0, len(ev.Changed))
+	removed := make([]string, 0, len(ev.Removed))
 	flush := func() {
 		if len(changed) == 0 && len(removed) == 0 {
-			changed, removed = nil, nil
 			return
 		}
 		out = append(out, mustMarshal(deltaResponse{"torrent.delta", ProtocolVersion, ev.Seq, changed, removed}))
-		changed, removed = nil, nil
+		changed = make([]TorrentItem, 0, cap(changed))
+		removed = make([]string, 0, cap(removed))
 	}
 	size := 0
 	for _, t := range ev.Changed {
 		t.Name = CapName(t.Name)
-		b, _ := json.Marshal(t)
+		b, err := json.Marshal(t)
+		if err != nil {
+			continue // unreachable for current field types; never panic
+		}
+		if len(b) > budget {
+			continue // a single pathological item is dropped, not framed
+		}
 		if size+len(b) > budget && (len(changed) > 0 || len(removed) > 0) {
 			flush()
 			size = 0
@@ -209,6 +211,29 @@ func EncodeDeltas(ev DeltaEvent) [][]byte {
 	}
 	flush()
 	return out
+}
+
+// EncodeSnapshotItem caps name and category and never emits a frame
+// above MaxFrame: with syncer-validated hashes (40/64 hex) the worst
+// case fits the budget, and the halving guard below is pure defense
+// against pathological escape amplification.
+func EncodeSnapshotItem(id int64, index int, t TorrentItem) []byte {
+	t.Name = CapName(t.Name)
+	t.Category = capString(t.Category, 128)
+	b := mustMarshal(snapshotItemResponse{"torrent.snapshot.item", ProtocolVersion, id, index, t})
+	for len(b)+1 > MaxFrame && len([]rune(t.Name)) > 32 {
+		t.Name = capString(t.Name, len([]rune(t.Name))/2)
+		b = mustMarshal(snapshotItemResponse{"torrent.snapshot.item", ProtocolVersion, id, index, t})
+	}
+	return b
+}
+
+func capString(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes-1]) + "…"
 }
 
 // EncodeHello, EncodeHealth, EncodeStatus, EncodeError produce response

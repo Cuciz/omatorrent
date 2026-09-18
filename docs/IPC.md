@@ -77,8 +77,9 @@ Response when qBittorrent data is available (exact key set):
  "dl_speed":0,"up_speed":0,"torrents_total":3}
 ```
 - `app_version`/`webapi_version`: strings from the live qBittorrent probes.
-- `dl_speed`/`up_speed`: integers, bytes/second (from `transfer/info`).
-- `torrents_total`: integer (torrent list length).
+- `dl_speed`/`up_speed`: integers, bytes/second; `torrents_total`:
+  integer — all derived from the daemon's `sync/maindata` cache (0.2+;
+  no per-poll torrent-list downloads).
 
 Response when qBittorrent is unreachable (only these four keys):
 ```json
@@ -120,9 +121,12 @@ Thereafter, on each daemon state change:
 ```json
 {"type":"torrent.delta","protocol":1,"seq":7,"changed":[{…torrent…}],"removed":["…hash…"]}
 ```
-Large changes are split into multiple `torrent.delta` frames sharing the
-same `seq`; clients apply each frame's `changed`/`removed` as it
-arrives. `seq` is strictly increasing per subscription.
+`changed`/`removed` are always JSON arrays (possibly empty, never
+`null`). Large changes are split into multiple `torrent.delta` frames
+sharing the same `seq`; clients apply each frame's `changed`/`removed`
+as it arrives. `seq` is a daemon-global monotonically increasing value:
+strictly increasing within a subscription, may start at any number and
+contain gaps; it identifies ordering, not per-subscription counting.
 
 ### Normalized torrent item (exact key set; identical everywhere it appears)
 
@@ -140,7 +144,10 @@ arrives. `seq` is strictly increasing per subscription.
 
 ### Lifecycle
 
-- One subscription per connection; it ends when the connection closes.
+- One subscription per connection; a second `torrent.subscribe` gets an
+  `unsupported_message` error frame but does NOT close the connection
+  (the existing subscription keeps working). The subscription ends when
+  the connection closes.
 - Every (re)subscription starts with a fresh full snapshot under its own
   id; stale frames cannot survive a reconnect.
 - Per-subscriber server-side queue is bounded (256 frames); overflow or
@@ -165,7 +172,7 @@ Response shape (then connection closes):
 | message_too_large | Frame cannot fit in 4096 bytes including LF |
 | handshake_required | A valid message other than hello arrives first |
 | version_mismatch | First hello has an integer protocol other than 1 |
-| unsupported_message | After hello, a valid message type other than health/system.status/torrent.subscribe, including another hello |
+| unsupported_message | After hello, a valid message type other than health/system.status/torrent.subscribe, including another hello; also a second torrent.subscribe on an already-subscribed connection (error only, connection stays open) |
 
 Unknown message types use the type-only shape; adding other fields is
 invalid_message. A hello never carries an id; health/system.status always

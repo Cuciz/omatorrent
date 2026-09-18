@@ -68,11 +68,39 @@ filter switch).
 | Secret scan | PASS |
 | qBittorrent-restart live resync | NOT RUN live (would require restarting the user's qbittorrent-nox); covered by fixture tests (full_update rebuild) |
 
-## Review verdicts
+## Review verdicts (all three ran after implementation, implementer excluded)
 
-- Architecture review: PENDING (filled in the PR).
-- Security review: PENDING (filled in the PR).
-- QA/release review: PENDING (filled in the PR).
+- **Architecture: APPROVE-WITH-NOTES.** All three requirements VERIFIED:
+  QML presentation-only (vocabulary audit clean; view sync and filters
+  judged presentation per docs/IPC.md client obligations); rid/merge
+  logic solely in internal/state (import graph verified); no qBittorrent
+  detail on the wire (normalized set only). Fixes applied from notes:
+  frame-bound hardening (encode guards), empty arrays never null,
+  Subscribe registration made atomic with the snapshot read,
+  backendOK dead return removed, subId dead property removed,
+  subscribe-after-first-status (one-in-flight discipline), stale
+  IPC.md sources corrected, manifest bumped to 0.2.0, contract examples
+  + anti-drift test, seq wording amended, second-subscribe behavior
+  documented. Accepted/deferred: QML helper dedup into a shared JS
+  module, popout-switch niceties, j/k navigation.
+- **Security: PASS-WITH-FINDINGS.** Both MEDIUMs fixed: (1) frame-budget
+  breach via uncapped backend strings — hashes now validated at
+  normalization (40/64 hex, violations discard the cycle preserving
+  last-known-good; tests added), categories capped at 128 runes,
+  encode-time size guards on snapshot items and pathological delta
+  items; (2) O(N²) panel snapshot application — snapshot items now
+  batch into source state with a single rebuild at snapshot.end, row
+  lookups are O(1) via a maintained hash→row index (viewIndex linear
+  scan removed). Also fixed: EncodeDeltas no longer discards marshal
+  errors, QML delta path validates items before applying. Explicit
+  confirmations from the reviewer: no frame can exceed the budget via
+  names (3473 B worst measured), no unbounded memory growth (all
+  buffers bounded, drop-close everywhere), no mutation endpoints, no
+  secret leakage.
+- **QA/release: READY-FOR-REVIEW.** All 10 checks independently
+  reproduced PASS (including race suite, benchmarks matching within
+  noise, live smoke, daemon lifecycle, secret scan, ghost-prevention
+  test). Flag acted on: screenshots re-captured fully framed.
 
 ## Known limitations
 

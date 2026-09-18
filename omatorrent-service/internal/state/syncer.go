@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -32,6 +33,26 @@ const (
 
 // EtaUnknown is the eta sentinel for ∞/unknown (matches qBittorrent).
 const EtaUnknown = 8640000
+
+// CategoryCapRunes bounds the category on the normalized model so wire
+// frames stay inside the IPC budget (ADR-0005; security review finding).
+const CategoryCapRunes = 128
+
+// hashRe accepts v1 (40 hex) and v2 (64 hex) infohashes only. Anything
+// else is treated as a malformed payload: the cycle is discarded and the
+// last-known-good state kept (uncapped backend strings must never reach
+// the wire frame budget).
+var hashRe = regexp.MustCompile(`^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$`)
+
+func validHash(h string) bool { return hashRe.MatchString(h) }
+
+func capRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
+}
 
 // Torrent is the normalized, IPC-ready torrent item.
 type Torrent struct {
@@ -147,19 +168,19 @@ func (s *Syncer) Health() bool {
 }
 
 // Subscribe returns the current committed state and a channel of
-// subsequent changes. The channel is dropped-when-full from the
-// subscriber side is NOT used: the IPC server closes the subscriber on
-// overflow, so the channel is small and the receiver must keep up or be
-// disconnected. Cancel stops delivery.
+// subsequent changes. Registration happens under s.mu together with the
+// snapshot read, so a cycle committing concurrently is either fully
+// contained in the snapshot (registered after commit) or delivered as
+// the first change (registered before commit) — a delta can never fall
+// in between. Cancel stops delivery.
 func (s *Syncer) Subscribe() (State, <-chan Change, func()) {
+	ch := make(chan Change, 64)
 	s.mu.Lock()
 	st := s.cur.shallowCopy()
-	s.mu.Unlock()
-
-	ch := make(chan Change, 64)
 	s.subsMu.Lock()
 	s.subs[ch] = struct{}{}
 	s.subsMu.Unlock()
+	s.mu.Unlock()
 
 	cancel := func() {
 		s.subsMu.Lock()
@@ -261,6 +282,10 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 	if md.FullUpdate {
 		next.Torrents = make(map[string]Torrent, len(md.Torrents))
 		for h, raw := range md.Torrents {
+			if !validHash(h) {
+				s.commitDegraded(errors.New("malformed full update: bad hash"))
+				return false
+			}
 			t, err := decodeFull(raw)
 			if err != nil {
 				s.commitDegraded(fmt.Errorf("malformed full update for hash %d", len(h)))
@@ -282,6 +307,10 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 		next.AppVersion, next.WebAPIVersion = prev.AppVersion, prev.WebAPIVersion
 	} else {
 		for h, raw := range md.Torrents {
+			if !validHash(h) {
+				s.commitDegraded(errors.New("malformed delta: bad hash"))
+				return false
+			}
 			var p partialTorrent
 			if err := json.Unmarshal(raw, &p); err != nil {
 				s.commitDegraded(fmt.Errorf("malformed delta for hash %d", len(h)))
@@ -406,7 +435,7 @@ func (p *partialTorrent) apply(t *Torrent) {
 		t.Ratio = *p.Ratio
 	}
 	if p.Category != nil {
-		t.Category = *p.Category
+		t.Category = capRunes(*p.Category, CategoryCapRunes)
 	}
 	if p.Size != nil {
 		t.Size = *p.Size

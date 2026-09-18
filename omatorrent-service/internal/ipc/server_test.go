@@ -705,7 +705,7 @@ type fakeSubs struct {
 	events chan DeltaEvent
 }
 
-func (f *fakeSubs) Subscribe() (bool, []TorrentItem, <-chan DeltaEvent, func()) {
+func (f *fakeSubs) Subscribe() ([]TorrentItem, <-chan DeltaEvent, func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.events == nil {
@@ -714,7 +714,7 @@ func (f *fakeSubs) Subscribe() (bool, []TorrentItem, <-chan DeltaEvent, func()) 
 	items := make([]TorrentItem, len(f.items))
 	copy(items, f.items)
 	cancel := func() {}
-	return true, items, f.events, cancel
+	return items, f.events, cancel
 }
 
 func startSubServer(t *testing.T, subs Subscriptions) (*fakeSubs, string) {
@@ -925,4 +925,32 @@ func TestSlowSubscriberDisconnected(t *testing.T) {
 		}
 	}
 	t.Fatal("slow subscriber was not disconnected")
+}
+
+// v1.1 contract example files match the encoders (anti-drift).
+func TestContractExamplesV11(t *testing.T) {
+	dir := filepath.Join(filepath.Dir(mustCallerFile(t)), "..", "..", "..", "contracts", "ipc", "v1")
+	sub, err := os.ReadFile(filepath.Join(dir, "torrent-subscribe.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSuffix(string(sub), "\n"); got != `{"type":"torrent.subscribe","id":3}` {
+		t.Fatalf("subscribe example drifted: %s", got)
+	}
+	resp, err := os.ReadFile(filepath.Join(dir, "response-torrent-subscribed.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSuffix(string(resp), "\n"); got != string(EncodeSubscribed(3)) {
+		t.Fatalf("subscribed example drifted: %s vs %s", got, EncodeSubscribed(3))
+	}
+}
+
+func mustCallerFile(t *testing.T) string {
+	t.Helper()
+	_, f, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller")
+	}
+	return f
 }

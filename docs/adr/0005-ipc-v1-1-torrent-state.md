@@ -34,7 +34,13 @@ changes; v1 clients that never send the new request see no difference
   `{"type":"torrent.delta","protocol":1,"seq":S,"changed":[torrent...],"removed":[hash...]}`
   frames, split into as many frames as the byte budget requires (all
   frames of one change share `seq`; clients apply frames as they
-  arrive; ordering per connection is guaranteed).
+  arrive; ordering per connection is guaranteed). `seq` is the daemon's
+  global change counter: strictly increasing within a subscription,
+  possibly with gaps — ordering identity, not a per-subscription index.
+  Implementation hardening from review: backend hashes are validated
+  (40/64 hex) and categories capped (128 runes) at normalization, so
+  uncapped backend strings cannot breach the frame budget; snapshot
+  items are size-guarded at encode time as defense in depth.
 - Subscriptions end when the connection closes. The v1.0 request set
   (hello/health/system.status) remains available on the same
   connection.

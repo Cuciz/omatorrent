@@ -111,7 +111,7 @@ func (h *daemonHandler) StatusData() (ipc.StatusData, bool) {
 // Subscribe implements ipc.Subscriptions from the syncer's committed
 // state and change events. Forwarding is bounded: a slow IPC consumer
 // is dropped (closed channel) per the ADR-0005 slow-consumer rule.
-func (h *daemonHandler) Subscribe() (bool, []ipc.TorrentItem, <-chan ipc.DeltaEvent, func()) {
+func (h *daemonHandler) Subscribe() ([]ipc.TorrentItem, <-chan ipc.DeltaEvent, func()) {
 	st, events, cancel := h.syncer.Subscribe()
 	items := make([]ipc.TorrentItem, 0, len(st.Torrents))
 	for _, t := range st.Torrents {
@@ -132,7 +132,7 @@ func (h *daemonHandler) Subscribe() (bool, []ipc.TorrentItem, <-chan ipc.DeltaEv
 			}
 		}
 	}()
-	return st.BackendOK, items, ch, cancel
+	return items, ch, cancel
 }
 
 func toItem(t state.Torrent) ipc.TorrentItem {

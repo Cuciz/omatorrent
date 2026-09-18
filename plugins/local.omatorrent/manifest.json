@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "id": "local.omatorrent",
   "name": "OmaTorrent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Cuciz",
   "description": "qBittorrent transfer status via the omatorrent-service daemon.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {
     "displayName": "OmaTorrent",
-    "description": "Compact qBittorrent transfer state (Phase 0 proof).",
+    "description": "qBittorrent transfer state and read-only torrent panel.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right"

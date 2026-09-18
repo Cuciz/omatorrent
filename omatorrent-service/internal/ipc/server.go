@@ -36,7 +36,7 @@ type Handler interface {
 // of subsequent changes; cancel stops delivery. Implementations must
 // close the channel when the subscriber is dropped.
 type Subscriptions interface {
-	Subscribe() (backendOK bool, items []TorrentItem, events <-chan DeltaEvent, cancel func())
+	Subscribe() (items []TorrentItem, events <-chan DeltaEvent, cancel func())
 }
 
 // Server is the IPC v1 Unix-socket server. Socket lifecycle follows
@@ -483,12 +483,14 @@ func (s *Server) handle(conn net.Conn) {
 				c.send(EncodeError(failCode(errUnsupported)))
 				return
 			}
-			if !c.subscribed {
-				c.subscribed = true
+			if c.markSubscribed() {
 				c.send(EncodeSubscribed(req.ID))
 				s.startSubscription(c, req.ID)
 			} else {
-				c.send(EncodeError(failCode(errUnsupported))) // one per connection
+				// One subscription per connection; the existing one keeps
+				// working and the connection stays open (documented in
+				// docs/IPC.md v1.1 lifecycle).
+				c.send(EncodeError(failCode(errUnsupported)))
 			}
 		default:
 			c.send(EncodeError(failCode(errUnsupported)))
@@ -505,7 +507,7 @@ func (s *Server) handle(conn net.Conn) {
 func (s *Server) startSubscription(c *connIO, id int64) {
 	// Backend reachability reaches clients via system.status; the
 	// subscription carries torrent state only (ADR-0005).
-	_, items, events, cancel := s.subs.Subscribe()
+	items, events, cancel := s.subs.Subscribe()
 	c.setSubCancel(cancel)
 
 	sortItems(items)
@@ -636,6 +638,18 @@ func (c *connIO) setSubCancel(cancel func()) {
 	c.subMu.Lock()
 	c.subCancel = cancel
 	c.subMu.Unlock()
+}
+
+// markSubscribed latches the one-subscription-per-connection rule
+// atomically (read loop is single-threaded, but keep it structural).
+func (c *connIO) markSubscribed() bool {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	if c.subscribed {
+		return false
+	}
+	c.subscribed = true
+	return true
 }
 
 func (c *connIO) cancelSubLocked() {
