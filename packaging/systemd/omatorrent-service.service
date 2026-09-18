@@ -1,0 +1,25 @@
+[Unit]
+Description=OmaTorrent service daemon
+Documentation=https://github.com/Cuciz/omatorrent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/omatorrent-service
+Restart=on-failure
+RestartSec=2s
+
+# Phase 0 notes (deliberately not over-hardened yet):
+# - XDG_RUNTIME_DIR is guaranteed set, owned and private for user units;
+#   the daemon fail-closes on unsafe socket paths itself (ADR-0004).
+# - Socket lifecycle (create 0700/0600, identity-checked removal) is
+#   owned by the daemon; no RuntimeDirectory= here on purpose.
+# - Future hardening candidates (0.9): ProtectSystem=strict,
+#   ProtectHome=read-only with an exception for the config file,
+#   PrivateTmp=yes, NoNewPrivileges=yes, SystemCallFilter.
+# - Unclean exits (SIGKILL) leave a stale socket by design; the service
+#   then refuses to start until the operator removes it (checked first
+#   that no other instance runs).
+
+[Install]
+WantedBy=default.target
