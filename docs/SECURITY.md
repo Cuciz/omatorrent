@@ -35,9 +35,15 @@ recorded in docs/agent/PHASE0.md per change.
 - Unix-domain socket at `$XDG_RUNTIME_DIR/omatorrent/service.sock`:
   application dir 0700, socket 0600 (umask 077 + explicit chmod,
   contract-tested). Runtime dir validated (absolute, UID-owned, 0700,
-  no symlink components); unsafe or existing paths are refused — never
-  repaired, never auto-deleted. Shutdown removes the socket only after a
-  dev/ino identity match.
+  no symlink components); unsafe paths are refused — never repaired.
+  An existing socket is removed only when proven stale: exact expected
+  shape (socket type, UID-owned, mode 0600, no symlink) plus a
+  dead-listener probe (ECONNREFUSED), a file-identity re-check between
+  probe and unlink, and a full IPC v1 hello probe — a live answer means
+  another daemon owns the socket and startup is refused. Ambiguous
+  states (timeouts, garbage, wrong shape) fail closed; nothing is
+  deleted blindly. Shutdown removes the socket only after a dev/ino
+  identity match.
 - Versioned handshake; incompatible versions rejected safely
   (version_mismatch, tested).
 - Malformed messages never crash either side; frames bounded at 4096
@@ -45,9 +51,10 @@ recorded in docs/agent/PHASE0.md per change.
   non-integer numbers, invalid UTF-8 and trailing JSON all rejected as
   invalid_message (tested). Error responses never echo payload or ids.
 - Resource limits: 16 clients (excess closed silently), 5 s handshake
-  deadline, 30 s idle read deadline, 5 s write deadline. qBittorrent is
-  never contacted synchronously from an IPC request except one bounded
-  first fetch (3 s) — degraded snapshot otherwise.
+  deadline, 30 s idle read deadline, 5 s write deadline. Status/health
+  are served exclusively from the background refresher's cache — no IPC
+  request ever contacts qBittorrent; before the first refresh the
+  degraded shapes are returned.
 - Same-UID processes are inside the filesystem trust boundary
   (documented in ADR-0004): a same-user attacker can race path checks.
   Cross-UID protection is what the 0600/0700 permissions provide.

@@ -1,7 +1,8 @@
 // Package state owns the daemon's cached view of the qBittorrent backend
 // and the reconnect/backoff loop. The IPC layer serves exclusively from
-// this cache; qBittorrent is never contacted synchronously from a request
-// path except for a bounded first fetch before the refresher has run.
+// this cache; all qBittorrent I/O happens in the background refresher,
+// never on a request path. Before the first refresh completes, Snapshot
+// reports the degraded loading state.
 package state
 
 import (
@@ -37,11 +38,14 @@ type Snapshot struct {
 	LastError     string
 }
 
+// StatusLoading is Snapshot.LastError until the background refresher has
+// completed its first cycle; IPC surfaces it as qbittorrent:"unavailable".
+const StatusLoading = "loading"
+
 // Options tunes the refresher. Zero values get Phase 0 defaults.
 type Options struct {
 	Interval   time.Duration // refresh interval after success (default 2s)
 	MaxBackoff time.Duration // failure backoff cap (default 30s)
-	FetchSync  time.Duration // bounded first-fetch timeout (default 3s)
 	FetchBg    time.Duration // background fetch timeout (default 4s)
 }
 
@@ -51,9 +55,6 @@ func (o *Options) fill() {
 	}
 	if o.MaxBackoff == 0 {
 		o.MaxBackoff = 30 * time.Second
-	}
-	if o.FetchSync == 0 {
-		o.FetchSync = 3 * time.Second
 	}
 	if o.FetchBg == 0 {
 		o.FetchBg = 4 * time.Second
@@ -66,18 +67,18 @@ type Manager struct {
 	opts    Options
 	log     *slog.Logger
 
-	mu        sync.Mutex
-	snap      Snapshot
-	refreshed bool
+	mu   sync.Mutex
+	snap Snapshot
 }
 
-// New creates a Manager. Call Run to start the refresher.
+// New creates a Manager. Call Run to start the refresher; until its first
+// cycle completes, Snapshot reports the degraded loading state.
 func New(backend Backend, opts Options, log *slog.Logger) *Manager {
 	opts.fill()
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{backend: backend, opts: opts, log: log}
+	return &Manager{backend: backend, opts: opts, log: log, snap: Snapshot{LastError: StatusLoading}}
 }
 
 // Run refreshes until ctx is done. On failure it backs off exponentially
@@ -115,19 +116,11 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// Snapshot returns the cached view. If the refresher has not completed a
-// cycle yet, one bounded synchronous fetch is attempted (bounded well
-// under the IPC 5 s write deadline; on failure the degraded snapshot is
-// returned — never an error).
+// Snapshot returns the cached view. It NEVER contacts the backend: the
+// background refresher owns all qBittorrent I/O, so an IPC request can
+// only ever read completed-cycle state. Before the first cycle it
+// reports the degraded loading state (LastError == StatusLoading).
 func (m *Manager) Snapshot() Snapshot {
-	m.mu.Lock()
-	refreshed := m.refreshed
-	m.mu.Unlock()
-	if !refreshed {
-		ctx, cancel := context.WithTimeout(context.Background(), m.opts.FetchSync)
-		m.refresh(ctx, m.opts.FetchSync)
-		cancel()
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.snap
@@ -185,7 +178,6 @@ func (m *Manager) refresh(ctx context.Context, timeout time.Duration) bool {
 func (m *Manager) store(snap Snapshot) {
 	m.mu.Lock()
 	m.snap = snap
-	m.refreshed = true
 	m.mu.Unlock()
 }
 

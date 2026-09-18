@@ -167,15 +167,120 @@ func New(socketPath string, handler Handler, log *slog.Logger) (*Server, error) 
 	}, nil
 }
 
-// Serve creates the listener and serves until Close. The socket is created
-// with a restrictive umask and explicitly chmod 0600; any pre-existing
-// path is refused. Go's automatic unlink-on-close is disabled; Close
-// removes the socket only when its file identity still matches.
-func (s *Server) Serve() error {
-	if _, err := os.Lstat(s.socketPath); err == nil {
-		return fmt.Errorf("ipc: refusing existing socket path %s", s.socketPath)
-	} else if !errors.Is(err, os.ErrNotExist) {
+// recoverStaleSocket decides what to do with an existing socket path
+// before listening. Policy (fail closed on ambiguity):
+//
+//   - path absent: nothing to do.
+//   - live daemon answers an IPC v1 hello on it: refuse startup.
+//   - socket file of the exact expected shape (UID-owned, mode 0600,
+//     type socket, no symlink) whose listener is PROVEN dead
+//     (connect → ECONNREFUSED): remove it and proceed. Removal is
+//     guarded by a file-identity re-check so a socket swapped between
+//     probe and removal is not deleted.
+//   - anything else (wrong type/owner/permissions, symlink, connect
+//     timeout, protocol garbage, unexpected errors): refuse startup.
+//
+// Residual same-UID races remain inside the ADR-0004 trust boundary.
+func (s *Server) recoverStaleSocket() error {
+	fi, err := os.Lstat(s.socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("ipc: inspect socket path %s: %w", s.socketPath, err)
+	}
+
+	// Shape checks: exact type, owner and permissions.
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("ipc: refusing symlink at socket path %s", s.socketPath)
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("ipc: refusing non-socket file at socket path %s", s.socketPath)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Uid != uint32(os.Getuid()) {
+		return fmt.Errorf("ipc: refusing socket %s not owned by uid %d", s.socketPath, os.Getuid())
+	}
+	if fi.Mode().Perm() != 0o600 {
+		return fmt.Errorf("ipc: refusing socket %s with mode %04o (want 0600)", s.socketPath, fi.Mode().Perm())
+	}
+
+	// Liveness probe. ECONNREFUSED is the only "stale" verdict; any
+	// connection attempt that succeeds gets a full hello handshake — a
+	// live omatorrent-service answers and startup is refused. Timeouts
+	// or garbage are ambiguous → refuse.
+	live, err := probeLiveDaemon(s.socketPath)
+	if err != nil {
+		return fmt.Errorf("ipc: refusing ambiguous socket %s: %w", s.socketPath, err)
+	}
+	if live {
+		return fmt.Errorf("ipc: refusing socket %s: another omatorrent-service is answering on it", s.socketPath)
+	}
+
+	// Stale proven. Re-check identity, then remove only what was probed.
+	fi2, err := os.Lstat(s.socketPath)
+	if err != nil {
+		return fmt.Errorf("ipc: re-inspect stale socket %s: %w", s.socketPath, err)
+	}
+	if !sameFile(fi, fi2) {
+		return fmt.Errorf("ipc: refusing socket %s: path changed during staleness probe", s.socketPath)
+	}
+	if err := os.Remove(s.socketPath); err != nil {
+		return fmt.Errorf("ipc: remove stale socket %s: %w", s.socketPath, err)
+	}
+	s.log.Info("removed stale socket (listener proven dead, identity verified)", "path", s.socketPath)
+	return nil
+}
+
+// probeLiveDaemon dials the socket and performs an IPC v1 hello.
+// Returns (true, nil) when a daemon answers with the expected hello;
+// (false, nil) only on ECONNREFUSED (no listener bound); any other
+// outcome is an error (ambiguous).
+func probeLiveDaemon(path string) (live bool, err error) {
+	conn, err := net.DialTimeout("unix", path, 1500*time.Millisecond)
+	if err != nil {
+		if isConnectionRefused(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+	if _, err := conn.Write([]byte("{\"type\":\"hello\",\"protocol\":1}\n")); err != nil {
+		return false, fmt.Errorf("probe write: %w", err)
+	}
+	line, err := bufio.NewReaderSize(conn, MaxFrame).ReadString('\n')
+	if err != nil {
+		return false, fmt.Errorf("probe read: %w", err)
+	}
+	if strings.TrimSuffix(line, "\n") == string(EncodeHello()) {
+		return true, nil
+	}
+	return false, fmt.Errorf("unexpected probe answer")
+}
+
+func isConnectionRefused(err error) bool {
+	var oerr *net.OpError
+	if errors.As(err, &oerr) {
+		return errors.Is(oerr.Err, syscall.ECONNREFUSED)
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+func sameFile(a, b os.FileInfo) bool {
+	return a.Mode() == b.Mode() &&
+		os.SameFile(a, b)
+}
+
+// Serve creates the listener and serves until Close. The socket is created
+// with a restrictive umask and explicitly chmod 0600. A pre-existing path
+// is refused unless it is a PROVEN-stale socket (see recoverStaleSocket);
+// anything ambiguous fails closed. Go's automatic unlink-on-close is
+// disabled; Close removes the socket only when its file identity still
+// matches.
+func (s *Server) Serve() error {
+	if err := s.recoverStaleSocket(); err != nil {
+		return err
 	}
 
 	oldMask := syscall.Umask(0o077)

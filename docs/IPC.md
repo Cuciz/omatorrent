@@ -9,10 +9,20 @@ vs JSON-RPC/binary framing.
 Unix stream socket: $XDG_RUNTIME_DIR/omatorrent/service.sock. Runtime directory
 must exist, be absolute, owned by the process UID, mode 0700, with no symlink
 path components. Application directory 0700; socket 0600. Existing unsafe
-directories or any existing socket path cause startup failure. No automatic
-stale-file deletion or permission repair. Graceful shutdown closes clients
-and removes only the original socket (file identity check); same-UID hostile
-processes are outside the filesystem trust boundary.
+directories cause startup failure; no permission repair.
+
+An existing socket path is handled fail-closed with one narrow exception:
+a socket file of the exact expected shape (type socket, no symlink,
+UID-owned, mode 0600) whose listener is **proven dead** (connect returns
+ECONNREFUSED) is removed and the path reused — this recovers the socket a
+SIGKILL'd daemon left behind. The removal is guarded by a file-identity
+re-check between probe and unlink. In every other case the daemon refuses
+to start: another omatorrent-service answering an IPC v1 hello on the
+socket (live instance), a connect that times out or answers anything other
+than the exact hello response (ambiguous), wrong type/owner/permissions,
+or a symlink. Nothing is ever deleted blindly; residual same-UID races
+remain inside the documented trust boundary. Graceful shutdown closes
+clients and removes only the original socket (file identity check).
 
 A frame is one valid UTF-8 JSON object followed by LF, at most **4096 bytes
 including LF**. JSON whitespace is allowed; no unknown fields, duplicate
@@ -72,10 +82,15 @@ Response when qBittorrent is unreachable (only these four keys):
 ```json
 {"type":"system.status","protocol":1,"id":2,"qbittorrent":"unavailable"}
 ```
-`system.status` is the Phase 0 bar-widget operation. It is served from the
-daemon's short-lived state cache; clients should not poll faster than 1 Hz.
-`torrent.snapshot` (full torrent list) is deliberately deferred to 0.2 with
-the incremental-sync design; adding it requires a reviewed v1.x extension.
+`system.status` is the Phase 0 bar-widget operation. It is served
+**exclusively from the daemon's state cache** — answering it never
+contacts qBittorrent. All backend I/O happens in the daemon's background
+refresher (2 s cadence, exponential backoff on failure); until the first
+refresh completes after daemon startup, `system.status` and `health`
+answer the degraded/unavailable shapes. Clients should not poll faster
+than 1 Hz. `torrent.snapshot` (full torrent list) is deliberately
+deferred to 0.2 with the incremental-sync design; adding it requires a
+reviewed v1.x extension.
 
 ## Errors and resource limits
 
@@ -102,18 +117,21 @@ response.
 
 At most 16 active clients; excess connections close without a response.
 Handshake deadline: 5 seconds. Following frames: 30-second idle read
-deadline; responses have a 5-second write deadline. A `system.status`
-response must arrive within its write deadline; if the qBittorrent fetch
-exceeds it, the degraded `qbittorrent:"unavailable"` response is sent.
-Every client is closed on shutdown, including clients stalled halfway
-through a frame.
+deadline; responses have a 5-second write deadline. Responses are always
+produced from cached state, so they arrive promptly; the degraded
+`qbittorrent:"unavailable"` shape is the answer whenever the cache holds
+no live backend state (startup window or backend down). Every client is
+closed on shutdown, including clients stalled halfway through a frame.
 
 ## Client obligations (Phase 0 QML client)
 
 - Connect, handshake, then poll `system.status` at a slow cadence
   (2 s in the proof) and/or `health` on demand.
-- On disconnect or error response: drop state, render the offline state,
-  reconnect with bounded backoff, handshake again before further requests.
+- Keep **at most one request in flight** per connection; match responses
+  by `id` and ignore responses whose id is not the pending one.
+- On disconnect or error response: drop state including the pending id,
+  render the offline state, reconnect with bounded backoff, and handshake
+  again before further requests.
 - Never send qBittorrent data, credentials, or derived secrets; this
   protocol carries none.
 

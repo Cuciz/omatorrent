@@ -47,9 +47,10 @@ Socket: `$XDG_RUNTIME_DIR/omatorrent/service.sock`.
 - Editing a plugin file in `~/.config/omarchy/plugins/` triggers a shell
   rescan, but an already-instantiated bar widget may keep running old
   code; use `omarchy-restart-shell` after widget edits for a clean state.
-- An unclean daemon kill (SIGKILL) leaves a stale socket by design
-  (ADR-0004); the next start refuses until the operator removes it after
-  confirming no instance runs.
+- An unclean daemon kill (SIGKILL) leaves a stale socket; the next start
+  recovers it safely (proven-dead probe + identity re-check, ADR-0004
+  amendment 2). A live daemon on the socket or any ambiguous state still
+  fails closed — check `journalctl --user -u omatorrent-service`.
 
 ## Working rules
 

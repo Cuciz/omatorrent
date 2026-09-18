@@ -63,35 +63,83 @@ func (f *fakeBackend) setFail(fail bool, err error) {
 
 func quietLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
-func TestSnapshotSyncFirstFetch(t *testing.T) {
+// TestSnapshotNeverContactsBackend proves the cache-only contract: before
+// Run's first cycle, Snapshot returns the degraded loading state without
+// touching the backend, no matter how many callers ask (no startup
+// stampede, no synchronous fetch on the IPC path).
+func TestSnapshotNeverContactsBackend(t *testing.T) {
 	fb := &fakeBackend{}
-	m := New(fb, Options{FetchSync: 100 * time.Millisecond}, quietLogger())
-	snap := m.Snapshot()
-	if !snap.QBittorrentOK || snap.AppVersion != "v5.2.3" || snap.WebAPIVersion != "2.15.1" {
-		t.Fatalf("snap = %+v", snap)
+	m := New(fb, Options{}, quietLogger())
+
+	for i := 0; i < 20; i++ {
+		snap := m.Snapshot()
+		if snap.QBittorrentOK {
+			t.Fatal("snapshot ok before first refresh")
+		}
+		if snap.LastError != StatusLoading {
+			t.Fatalf("LastError = %q, want %q", snap.LastError, StatusLoading)
+		}
 	}
-	if snap.DlSpeed != 11 || snap.UpSpeed != 22 || snap.TorrentsTotal != 3 {
-		t.Fatalf("snap = %+v", snap)
+	fb.mu.Lock()
+	calls := fb.calls
+	fb.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("backend contacted %d times before Run", calls)
 	}
-	if !m.Health() {
-		t.Fatal("health false after successful fetch")
+	if m.Health() {
+		t.Fatal("health true before first refresh")
 	}
+}
+
+func TestRunFirstCyclePopulatesSnapshot(t *testing.T) {
+	fb := &fakeBackend{}
+	m := New(fb, Options{Interval: 10 * time.Millisecond}, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := m.Snapshot()
+		if snap.QBittorrentOK {
+			if snap.AppVersion != "v5.2.3" || snap.WebAPIVersion != "2.15.1" {
+				t.Fatalf("versions not probed: %+v", snap)
+			}
+			if snap.DlSpeed != 11 || snap.UpSpeed != 22 || snap.TorrentsTotal != 3 {
+				t.Fatalf("snap = %+v", snap)
+			}
+			if !m.Health() {
+				t.Fatal("health false after successful cycle")
+			}
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("first refresh cycle never completed")
 }
 
 func TestSnapshotDegradedWhenBackendDown(t *testing.T) {
 	fb := &fakeBackend{}
 	fb.setFail(true, qbittorrent.ErrUnreachable)
-	m := New(fb, Options{FetchSync: 100 * time.Millisecond}, quietLogger())
-	snap := m.Snapshot()
-	if snap.QBittorrentOK {
-		t.Fatal("snapshot reports ok while backend down")
+	m := New(fb, Options{Interval: 5 * time.Millisecond}, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := m.Snapshot()
+		if !snap.QBittorrentOK && snap.LastError == "unreachable" {
+			if m.Health() {
+				t.Fatal("health true while backend down")
+			}
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	if snap.LastError != "unreachable" {
-		t.Fatalf("LastError = %q, want unreachable", snap.LastError)
-	}
-	if m.Health() {
-		t.Fatal("health true while backend down")
-	}
+	t.Fatal("degraded state never observed")
 }
 
 func TestErrorClassification(t *testing.T) {

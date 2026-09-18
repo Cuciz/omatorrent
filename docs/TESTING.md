@@ -28,20 +28,28 @@ evidence; "code looks right" is never sufficient.
   Unix sockets: hello handshake, version_mismatch, handshake_required,
   malformed frames (bad JSON, duplicate keys, unknown fields, invalid
   UTF-8, trailing JSON, null), exact-4096 accepted / 4097 rejected,
-  unsupported after handshake, clean disconnect, reconnect after orderly
-  server restart, stale socket refusal, client limit (17th closed),
-  socket perms 0600, unsafe parent dirs refused, shutdown closes stalled
-  clients + identity-checked socket removal, degraded system.status.
+  unsupported after handshake, clean disconnect (pre- and post-handshake),
+  reconnect after orderly server restart, stale-socket recovery
+  (proven-dead socket removed and reused; live daemon refused; wrong
+  permissions/symlink/non-socket/ambiguous-hanging-listener refused
+  untouched), client limit (17th closed), socket perms 0600, unsafe
+  parent dirs refused, shutdown closes stalled clients +
+  identity-checked socket removal, degraded system.status.
   Example frames in `contracts/ipc/v1/` are consumed by tests.
+- **Cache-only state** — `internal/state/manager_test.go`:
+  Snapshot/health never contact the backend (counted via fake; degraded
+  loading state before the first cycle), first Run cycle populates,
+  degraded when backend down, recovery, backoff, cancel.
 - **Integration (live backend)** — Phase 0 evidence gathered manually +
   scripted: live probes (`/api/v2/app/version`, `webapiVersion`,
   `transfer/info`, `sync/maindata` deltas — read-only), daemon ↔ real
   qbittorrent-nox via `ot-probe` (systemd-run), no mutations.
 - **Shell checks** — `omarchy plugin validate` (manifest schema),
   `tools/test_quickshell.sh` (isolated `qs` instance speaking IPC v1 to
-  the daemon), live bar observations + screenshots (visual-runtime
-  standard), degraded states observed (daemon stop/start), journal
-  error-free.
+  the daemon with the widget's one-in-flight/id-matching discipline,
+  including mismatched-id rejection), live bar observations +
+  screenshots (visual-runtime standard), degraded states observed
+  (daemon stop/start), journal error-free.
 
 ## done_when examples (the standard)
 

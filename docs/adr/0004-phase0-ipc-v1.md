@@ -1,10 +1,12 @@
 # ADR-0004: Minimal Phase 0 JSON Lines IPC v1
 
-STATUS: ACCEPTED (2026-09-18; amended same day before first commit — the
-original WIP scoped the plugin as inert with hello/health only; the Phase 0
-goal was widened to a live end-to-end proof, so the contract gained request
-ids, backend-aware health and system.status. Framing, socket lifecycle and
-error model are unchanged from the reviewed draft.)
+STATUS: ACCEPTED (2026-09-18; amended twice before merge:
+amendment 1 widened the original inert-plugin draft to the live
+end-to-end proof — request ids, backend-aware health, system.status;
+amendment 2, from PR review, (a) replaced operator-only stale-socket
+cleanup with fail-closed proven-stale recovery, (b) made status/health
+strictly cache-served, and (c) made one-request-in-flight + id matching
+normative for clients. Framing and error model are unchanged.)
 
 ## CONTEXT
 
@@ -39,17 +41,28 @@ limits are in docs/IPC.md.
   oversized input. Error responses never echo payload or ids. Limit
   connections and handshake/idle deadlines.
 
-Socket lifecycle (unchanged): create $XDG_RUNTIME_DIR/omatorrent/service.sock
-under an existing absolute, owned, private runtime directory (0700); the
-application subdirectory is 0700 and socket 0600. Reject symlinks in the
-runtime path and unsafe existing directories, never repair permissions
-automatically. Refuse any existing socket or file, including a stale
-socket. Disable Go automatic socket unlink; shutdown removes the socket
-only when its file identity matches the one created by this process.
-Processes with the same UID remain inside the trust boundary: a same-user
-attacker can race path checks or modify private files. A stale socket after
-an unclean exit requires deliberate operator cleanup after checking the
-service is stopped; no automatic replacement is provided.
+Socket lifecycle (amendment 2): create $XDG_RUNTIME_DIR/omatorrent/
+service.sock under an existing absolute, owned, private runtime directory
+(0700); the application subdirectory is 0700 and socket 0600. Reject
+symlinks in the runtime path and unsafe existing directories, never
+repair permissions automatically. Disable Go automatic socket unlink;
+shutdown removes the socket only when its file identity matches the one
+created by this process. An existing socket path is refused — with one
+exception added by amendment 2: a socket of the exact expected shape
+(type socket, no symlink, UID-owned, 0600) whose listener is proven dead
+by an ECONNREFUSED connect probe is removed (identity re-checked between
+probe and unlink) and the path reused. A full IPC v1 hello against the
+socket that receives the exact expected response means a live daemon
+owns it and startup is refused; connect timeouts or unexpected answers
+are ambiguous and fail closed. Nothing is deleted blindly. Processes
+with the same UID remain inside the trust boundary: a same-user attacker
+can race path checks or modify private files.
+
+Status serving (amendment 2): health and system.status are answered
+exclusively from the background refresher's cache; no IPC request ever
+contacts qBittorrent synchronously. Before the first refresh completes,
+the degraded shapes are returned. Clients must keep at most one request
+in flight and match responses by id (normative in docs/IPC.md).
 
 The Phase 0 QML client is no longer inert: it connects via Quickshell.Io
 `Socket` (QLocalSocket → Unix domain on Linux) with a `SplitParser`

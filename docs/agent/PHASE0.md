@@ -120,6 +120,37 @@ received; CRITICAL/HIGH findings would block the PR.
 - SIGKILL leaves a stale socket by design (ADR-0004); next start
   refuses until operator cleanup.
 
+## PR review round 2 (2026-09-18, on PR #2 before merge)
+
+Three findings addressed:
+
+1. **One request in flight (BarWidget.qml)**: pending-id tracking; no new
+   system.status while one is outstanding; responses matched by id
+   (mismatches ignored); pending state reset on disconnect/reconnect plus
+   a 6 s stuck-response guard that drops the session to the reconnect
+   path. The smoke test now exercises the same discipline including a
+   deliberate in-flight violation probe (response for the foreign id is
+   ignored).
+2. **Cache-only status**: Snapshot/Health never contact qBittorrent —
+   the synchronous first fetch was removed; before the background
+   refresher's first cycle completes, IPC answers the degraded
+   loading/unavailable shape. Eliminates the startup race and the
+   first-request stampede (test counts backend calls through a fake).
+   Options.FetchSync removed; comments, IPC.md, SECURITY.md, ADR-0004
+   updated to match behavior.
+3. **Safe stale-socket recovery (ADR-0004 amendment 2)**: an existing
+   socket is removed only when it has the exact expected shape (socket
+   type, no symlink, UID-owned, 0600), its listener is proven dead
+   (connect → ECONNREFUSED), and the file identity still matches between
+   probe and unlink. A full IPC v1 hello that receives the exact
+   expected response means a live daemon owns the socket → startup
+   refused. Any ambiguity (connect timeout, unexpected answer, wrong
+   shape/owner/permissions, symlink, non-socket) fails closed with the
+   path untouched. New tests: stale recovered, live daemon refused,
+   wrong perms refused untouched, symlink refused untouched,
+   hanging-listener (ambiguous) refused untouched, non-socket file
+   refused.
+
 ## Review verdicts
 
 Independent read-only reviews after implementation (implementer excluded;

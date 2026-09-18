@@ -401,8 +401,159 @@ func TestStaleSocketRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "refusing existing socket path") {
+	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "refusing non-socket file") {
 		t.Fatalf("expected refusal, got %v", err)
+	}
+}
+
+// makeStaleSocket creates a dead unix socket of exactly the shape the
+// daemon would leave behind after an unclean exit (0600, owned, listener
+// closed without unlink).
+func makeStaleSocket(t *testing.T, path string) {
+	t.Helper()
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	ln.Close()
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A socket left behind by a SIGKILL'd daemon (listener dead) is removed
+// and the new instance serves on the path.
+func TestStaleSocketRecovered(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	path := filepath.Join(dir, "service.sock")
+	makeStaleSocket(t, path)
+
+	srv, err := New(path, &fakeHandler{health: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		if err := srv.Serve(); err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	}()
+	t.Cleanup(srv.Close)
+
+	// The stale file exists from the start, so poll by dialing the NEW
+	// listener rather than watching the path.
+	c := waitDialable(t, path)
+	c.handshake()
+	c.send(`{"type":"health","id":1}`)
+	c.recv()
+}
+
+// waitDialable retries dialing until the new listener answers (the path
+// may exist as a stale file before recovery completes).
+func waitDialable(t *testing.T, path string) *client {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		conn, err := net.Dial("unix", path)
+		if err == nil {
+			t.Cleanup(func() { conn.Close() })
+			return &client{conn: conn, r: bufio.NewReaderSize(conn, MaxFrame), t: t}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("listener on %s never answered: %v", path, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A live daemon answering IPC v1 on the socket forbids a second instance.
+func TestActiveDaemonRefused(t *testing.T) {
+	_, path := startServer(t, &fakeHandler{health: true}) // live daemon
+
+	srv2, err := New(path, &fakeHandler{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv2.Serve(); err == nil || !strings.Contains(err.Error(), "another omatorrent-service is answering") {
+		t.Fatalf("expected live-daemon refusal, got %v", err)
+	}
+}
+
+// Stale socket with permissive permissions is never touched.
+func TestStaleSocketWrongPermsRefused(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	path := filepath.Join(dir, "service.sock")
+	makeStaleSocket(t, path)
+	os.Chmod(path, 0o666)
+
+	srv, err := New(path, &fakeHandler{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("expected perms refusal, got %v", err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("unsafe socket was removed: %v", err)
+	}
+}
+
+// A symlink at the socket path is refused untouched.
+func TestSocketSymlinkRefused(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	real := filepath.Join(dir, "real.sock")
+	makeStaleSocket(t, real)
+	path := filepath.Join(dir, "service.sock")
+	os.Symlink(real, path)
+
+	srv, err := New(path, &fakeHandler{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink refusal, got %v", err)
+	}
+}
+
+// A listener that accepts connections but never answers the hello is
+// ambiguous: startup fails closed, the socket is not removed.
+func TestHangingListenerRefused(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	path := filepath.Join(dir, "service.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	os.Chmod(path, 0o600)
+	go func() { // accept and hold connections silently
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+
+	srv, err := New(path, &fakeHandler{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguity refusal, got %v", err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("ambiguous socket was removed: %v", err)
 	}
 }
 

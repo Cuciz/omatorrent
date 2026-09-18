@@ -7,6 +7,10 @@ import qs.Ui
 // OmaTorrent Phase 0 bar proof: presentation only (ADR-0001). All state
 // comes from omatorrent-service over IPC v1 (ADR-0004) via a Unix socket;
 // no qBittorrent HTTP, no secrets, no business logic here.
+//
+// Client discipline (docs/IPC.md): exactly one request in flight per
+// connection; responses are matched by id; a response with an
+// unexpected id is ignored; pending state resets on disconnect.
 BarWidget {
   id: root
   moduleName: "local.omatorrent"
@@ -29,6 +33,12 @@ BarWidget {
   property int nextId: 1
   property int backoffMs: 1000
 
+  // One-in-flight tracking: id of the outstanding system.status request,
+  // -1 when none. pendingSince guards against a daemon that accepts the
+  // frame but never answers (reconnect after ~3 poll intervals).
+  property int pendingId: -1
+  property real pendingSince: 0
+
   readonly property string xdgRuntime: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string socketPath: xdgRuntime !== "" ? xdgRuntime + "/omatorrent/service.sock" : ""
 
@@ -46,12 +56,24 @@ BarWidget {
   function ensureSession() {
     if (sock.connected && !helloSent) {
       helloSent = true
+      pendingId = -1
       send({ type: "hello", protocol: 1 })
     }
   }
 
   function requestStatus() {
-    send({ type: "system.status", id: nextId++ })
+    if (pendingId !== -1) return // exactly one request in flight
+    pendingId = nextId++
+    pendingSince = Date.now()
+    send({ type: "system.status", id: pendingId })
+  }
+
+  function resetSession() {
+    helloSent = false
+    pendingId = -1
+    backendOk = false
+    dlSpeed = 0
+    upSpeed = 0
   }
 
   function handleLine(line) {
@@ -69,10 +91,10 @@ BarWidget {
         // health request is needed for the proof.
         requestStatus()
         break
-      case "health":
-        backendOk = msg.backend === "ok"
-        break
       case "system.status":
+        // Match by id; anything else (stale/duplicate/foreign) is ignored.
+        if (typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
         if (msg.qbittorrent === "ok") {
           backendOk = true
           appVersion = msg.app_version || ""
@@ -143,10 +165,7 @@ BarWidget {
         root.backoffMs = 1000
         root.ensureSession()
       } else {
-        root.helloSent = false
-        root.backendOk = false
-        root.dlSpeed = 0
-        root.upSpeed = 0
+        root.resetSession()
       }
     }
   }
@@ -158,7 +177,18 @@ BarWidget {
     repeat: true
     onTriggered: {
       root.ensureSession()
-      if (root.helloSent) root.requestStatus()
+      if (!root.helloSent) return
+      if (root.pendingId !== -1) {
+        // Still waiting for the outstanding response. The daemon answers
+        // or closes within its 5s write deadline; past that the session
+        // is dead — drop it and let the reconnect path take over.
+        if (Date.now() - root.pendingSince > 6000) {
+          root.resetSession()
+          sock.connected = false
+        }
+        return
+      }
+      root.requestStatus()
     }
   }
 

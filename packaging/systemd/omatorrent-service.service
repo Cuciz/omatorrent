@@ -18,9 +18,11 @@ PrivateTmp=yes
 #   owned by the daemon; no RuntimeDirectory= here on purpose.
 # - Remaining hardening candidates (0.9, need config-read exceptions):
 #   ProtectSystem=strict, ProtectHome=read-only, SystemCallFilter.
-# - Unclean exits (SIGKILL) leave a stale socket by design; the service
-#   then fails (bounded restart churn) until the operator removes it
-#   after checking no other instance runs.
+# - Unclean exits (SIGKILL) leave a stale socket; on restart the daemon
+#   probes it and removes it only when proven dead (ECONNREFUSED, exact
+#   shape, identity re-checked). A live answer or anything ambiguous
+#   fails closed, so Restart=on-failure churn ends in a failed state
+#   that needs operator attention only in genuinely ambiguous cases.
 
 [Install]
 WantedBy=default.target
