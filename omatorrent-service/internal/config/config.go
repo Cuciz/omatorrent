@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // QBittorrent is the backend endpoint configuration.
@@ -74,20 +76,28 @@ func Load(explicit string) (Config, error) {
 		path = filepath.Join(dir, "omatorrent", "service.json")
 	}
 
-	data, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) && explicit == "" && os.Getenv("OMATORRENT_CONFIG") == "" {
 			return cfg, nil
 		}
-		return cfg, fmt.Errorf("config: read %s: %w", path, err)
+		return cfg, fmt.Errorf("config: open %s: %w", path, err)
 	}
+	defer f.Close()
 
-	info, err := os.Stat(path)
+	// Stat the handle (not the path) so the permission check and the read
+	// see the same file; O_NOFOLLOW above refuses symlinked configs.
+	info, err := f.Stat()
 	if err != nil {
 		return cfg, fmt.Errorf("config: stat %s: %w", path, err)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return cfg, fmt.Errorf("config: %s: %w (mode %04o)", path, ErrInsecureConfig, info.Mode().Perm())
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	if err != nil {
+		return cfg, fmt.Errorf("config: read %s: %w", path, err)
 	}
 
 	var fileCfg Config

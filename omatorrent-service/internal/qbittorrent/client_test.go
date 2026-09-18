@@ -187,4 +187,9 @@ func TestInvalidBaseURL(t *testing.T) {
 	if _, err := New("http://127.0.0.1:8080/", "", ""); err != nil {
 		t.Fatalf("trailing slash rejected: %v", err)
 	}
+	// Credentials embedded in the URL are rejected: they would risk
+	// reaching logs (security review finding; docs/SECURITY.md).
+	if _, err := New("http://admin:pw@127.0.0.1:8080", "admin", "pw"); err == nil {
+		t.Fatal("URL userinfo accepted")
+	}
 }

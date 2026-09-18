@@ -18,8 +18,6 @@ type fakeBackend struct {
 	failErr error
 }
 
-func (f *fakeBackend) Login(ctx context.Context) error { return nil }
-
 func (f *fakeBackend) AppVersion(ctx context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

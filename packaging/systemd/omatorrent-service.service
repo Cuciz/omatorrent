@@ -8,18 +8,19 @@ Type=simple
 ExecStart=%h/.local/bin/omatorrent-service
 Restart=on-failure
 RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
 
-# Phase 0 notes (deliberately not over-hardened yet):
+# Phase 0 notes:
 # - XDG_RUNTIME_DIR is guaranteed set, owned and private for user units;
 #   the daemon fail-closes on unsafe socket paths itself (ADR-0004).
 # - Socket lifecycle (create 0700/0600, identity-checked removal) is
 #   owned by the daemon; no RuntimeDirectory= here on purpose.
-# - Future hardening candidates (0.9): ProtectSystem=strict,
-#   ProtectHome=read-only with an exception for the config file,
-#   PrivateTmp=yes, NoNewPrivileges=yes, SystemCallFilter.
+# - Remaining hardening candidates (0.9, need config-read exceptions):
+#   ProtectSystem=strict, ProtectHome=read-only, SystemCallFilter.
 # - Unclean exits (SIGKILL) leave a stale socket by design; the service
-#   then refuses to start until the operator removes it (checked first
-#   that no other instance runs).
+#   then fails (bounded restart churn) until the operator removes it
+#   after checking no other instance runs.
 
 [Install]
 WantedBy=default.target

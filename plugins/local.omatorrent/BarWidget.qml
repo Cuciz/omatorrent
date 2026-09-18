@@ -29,7 +29,8 @@ BarWidget {
   property int nextId: 1
   property int backoffMs: 1000
 
-  readonly property string socketPath: Quickshell.env("XDG_RUNTIME_DIR") + "/omatorrent/service.sock"
+  readonly property string xdgRuntime: Quickshell.env("XDG_RUNTIME_DIR") || ""
+  readonly property string socketPath: xdgRuntime !== "" ? xdgRuntime + "/omatorrent/service.sock" : ""
 
   property bool helloSent: false
 
@@ -54,6 +55,7 @@ BarWidget {
   }
 
   function handleLine(line) {
+    if (line.length > 4096) return // daemon frames are bounded; be robust anyway
     let msg
     try {
       msg = JSON.parse(line)
@@ -63,7 +65,8 @@ BarWidget {
     if (!msg || typeof msg.type !== "string") return
     switch (msg.type) {
       case "hello":
-        send({ type: "health", id: nextId++ })
+        // system.status already carries backend reachability; no separate
+        // health request is needed for the proof.
         requestStatus()
         break
       case "health":
@@ -167,6 +170,7 @@ BarWidget {
     running: true
     repeat: true
     onTriggered: {
+      if (!root.socketPath) return
       if (sock.connected) {
         root.backoffMs = 1000
       } else {
@@ -176,7 +180,7 @@ BarWidget {
     }
   }
 
-  Component.onCompleted: sock.connected = true
+  Component.onCompleted: if (root.socketPath !== "") sock.connected = true
 
   WidgetButton {
     id: button

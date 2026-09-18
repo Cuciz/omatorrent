@@ -15,9 +15,9 @@ import (
 )
 
 // Backend is the narrow adapter interface the manager depends on
-// (implemented by qbittorrent.Client; fakes in tests).
+// (implemented by qbittorrent.Client; fakes in tests). Auth is the
+// client's own concern (it re-logins on 403).
 type Backend interface {
-	Login(ctx context.Context) error
 	AppVersion(ctx context.Context) (string, error)
 	WebAPIVersion(ctx context.Context) (string, error)
 	TransferInfo(ctx context.Context) (qbittorrent.TransferInfo, error)
@@ -25,16 +25,16 @@ type Backend interface {
 }
 
 // Snapshot is the daemon's current view of the backend. Field values are
-// IPC-safe: no secrets, no torrent content.
+// IPC-safe: no secrets, no torrent content. (Never marshaled directly;
+// cmd/omatorrent-service maps it to the IPC response shapes.)
 type Snapshot struct {
-	QBittorrentOK bool      `json:"qbittorrent_ok"`
-	AppVersion    string    `json:"app_version,omitempty"`
-	WebAPIVersion string    `json:"webapi_version,omitempty"`
-	DlSpeed       int64     `json:"dl_speed"`
-	UpSpeed       int64     `json:"up_speed"`
-	TorrentsTotal int       `json:"torrents_total"`
-	LastOK        time.Time `json:"-"`
-	LastError     string    `json:"last_error,omitempty"`
+	QBittorrentOK bool
+	AppVersion    string
+	WebAPIVersion string
+	DlSpeed       int64
+	UpSpeed       int64
+	TorrentsTotal int
+	LastError     string
 }
 
 // Options tunes the refresher. Zero values get Phase 0 defaults.
@@ -140,11 +140,16 @@ func (m *Manager) Health() bool {
 	return m.snap.QBittorrentOK
 }
 
-// refresh performs one full fetch and updates the cache. Versions are
-// re-probed after any failure (cheap, rare).
+// refresh performs one full fetch and updates the cache. Speeds/count
+// are fetched every cycle; versions only while unknown or after the
+// previous cycle failed (they change only when qBittorrent restarts).
 func (m *Manager) refresh(ctx context.Context, timeout time.Duration) bool {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	m.mu.Lock()
+	prev := m.snap
+	m.mu.Unlock()
 
 	snap := Snapshot{}
 
@@ -162,21 +167,16 @@ func (m *Manager) refresh(ctx context.Context, timeout time.Duration) bool {
 	snap.UpSpeed = info.UpSpeed
 	snap.TorrentsTotal = count
 	snap.QBittorrentOK = true
-	snap.LastOK = time.Now()
 
-	app, err1 := m.backend.AppVersion(cctx)
-	api, err2 := m.backend.WebAPIVersion(cctx)
-	if err1 == nil && err2 == nil {
-		snap.AppVersion = app
-		snap.WebAPIVersion = api
+	if prev.AppVersion != "" && prev.QBittorrentOK {
+		snap.AppVersion, snap.WebAPIVersion = prev.AppVersion, prev.WebAPIVersion
 	} else {
-		// Speeds/count are live; versions could not be probed. Keep the
-		// previous probe values if any rather than failing the snapshot.
-		m.mu.Lock()
-		if m.snap.AppVersion != "" {
-			snap.AppVersion, snap.WebAPIVersion = m.snap.AppVersion, m.snap.WebAPIVersion
+		app, err1 := m.backend.AppVersion(cctx)
+		api, err2 := m.backend.WebAPIVersion(cctx)
+		if err1 == nil && err2 == nil {
+			snap.AppVersion = app
+			snap.WebAPIVersion = api
 		}
-		m.mu.Unlock()
 	}
 	m.store(snap)
 	return true

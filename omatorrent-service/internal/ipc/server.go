@@ -276,9 +276,6 @@ func (s *Server) Close() {
 	})
 }
 
-// SocketPath returns the resolved socket path.
-func (s *Server) SocketPath() string { return s.socketPath }
-
 // handle runs one connection: handshake, then the request loop.
 func (s *Server) handle(conn net.Conn) {
 	defer func() {
@@ -294,6 +291,9 @@ func (s *Server) handle(conn net.Conn) {
 	conn.SetDeadline(time.Now().Add(handshakeDeadline))
 	req, err := readRequest(reader)
 	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return // clean close before any frame
+		}
 		s.fail(conn, err)
 		return
 	}

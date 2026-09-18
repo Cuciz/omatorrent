@@ -50,10 +50,15 @@ type Client struct {
 }
 
 // New creates a client for the WebUI base URL (e.g. http://127.0.0.1:8080).
+// URLs with embedded userinfo are rejected: credentials belong in the
+// config fields, and a URL would risk reaching logs (docs/SECURITY.md).
 func New(baseURL, username, password string) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("qbittorrent: invalid base URL %q", baseURL)
+		return nil, fmt.Errorf("qbittorrent: invalid base URL (want scheme://host[:port])")
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("qbittorrent: credentials in the URL are not supported; use the config username/password fields")
 	}
 	return &Client{
 		base:     u,

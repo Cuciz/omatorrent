@@ -122,8 +122,32 @@ received; CRITICAL/HIGH findings would block the PR.
 
 ## Review verdicts
 
-- Security review: PENDING (running at time of writing; filled in the PR).
-- Architecture review: PENDING (running at time of writing; filled in the PR).
+Independent read-only reviews after implementation (implementer excluded;
+full texts in the PR conversation record):
+
+- **Security review: PASS-WITH-FINDINGS** (no CRITICAL/HIGH). Confirmed:
+  no secret reaches QML/logs/IPC; malformed IPC input cannot crash the
+  daemon; socket/config permissions enforced as documented (live-verified
+  0600/0700, no TCP listeners). Fixed after review: URL-userinfo
+  credentials now rejected at client construction (MEDIUM — would have
+  been logged); config stat-via-handle + O_NOFOLLOW before read; QML
+  line-length guard. Applied zero-cost hardening: NoNewPrivileges +
+  PrivateTmp in the systemd unit. Deferred with rationale (INFO-level):
+  singleflight first-fetch, torrents/info-for-count tradeoff, stale-
+  socket restart churn (documented in the unit), startup race noted by
+  reviewer (resolved by process exit).
+- **Architecture review: APPROVE-WITH-NOTES** (no invariant violations).
+  Confirmed: QML is presentation-only (poll/backoff are documented client
+  obligations, not business logic); package boundaries and dependency
+  direction correct; IPC implementation byte-consistent with
+  docs/IPC.md/ADR-0004; manifest matches installed Omarchy 4.0.4 schema;
+  no Phase 0 scope violations. Fixed after review: README status,
+  dead interface surface (Backend.Login, SocketPath(), unused JSON tags
+  /LastOK), version-probe cadence (only while unknown or after failure;
+  comment corrected), handshake-phase clean-EOF symmetry, redundant
+  health-on-hello removed, XDG_RUNTIME_DIR guard in QML. Deliberately
+  kept: TransferInfo.Status field (endpoint shape, consumed at 0.2),
+  WidgetButton explicit sizing (proven rendering, moon-phase pattern).
 
 ## Deferred (by design)
 
