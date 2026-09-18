@@ -117,8 +117,9 @@ received; CRITICAL/HIGH findings would block the PR.
   bootstrap-aware hello required.
 - Instantiated bar widgets can survive plugin rescans with stale code —
   `omarchy-restart-shell` after edits.
-- SIGKILL leaves a stale socket by design (ADR-0004); next start
-  refuses until operator cleanup.
+- SIGKILL leaves a stale socket; since review round 2 the next start
+  recovers it safely (proven-dead probe + identity re-check) — a live
+  daemon on the socket or any ambiguous state still fails closed.
 
 ## PR review round 2 (2026-09-18, on PR #2 before merge)
 
@@ -151,7 +152,31 @@ Three findings addressed:
    hanging-listener (ambiguous) refused untouched, non-socket file
    refused.
 
-## Review verdicts
+## Review verdicts (round 2, after the fixes above)
+
+- **Security re-review: PASS-WITH-FINDINGS** — all six prior fixes
+  VERIFIED (stale recovery, cache-only status, userinfo rejection,
+  config hardening, one-in-flight widget, unit hardening). Explicit
+  confirmations: recovery cannot delete a cross-UID socket (all race
+  windows same-UID-only, inside the documented boundary); no IPC request
+  path touches qBittorrent; no secret reaches logs/QML. New findings
+  were 2 LOW + 4 INFO; applied: byte-capped probe read (LOW), ENOENT
+  re-Lstat during probe, config symlink-refusal test. Documented as
+  accepted/deferred: SplitParser buffers before the QML length guard
+  (Quickshell-side, same-UID boundary, 0.x), loading-vs-error wire
+  indistinguishable (deliberate v1 shape), process-global umask,
+  identity-swap race test gap.
+- **Architecture re-review: APPROVE-WITH-NOTES** — all three PR
+  findings VERIFIED (one-in-flight stays presentation-side per
+  docs/IPC.md client obligations; ADR-0004 amendment 2 ↔ IPC.md ↔
+  SECURITY.md ↔ code consistent; no scope violations, no new dead
+  code). Notes applied: stale PHASE0.md bullet corrected,
+  replaced-path shutdown test added (TestShutdownLeavesReplacedSocket),
+  symlink-untouched assertion strengthened. Noted, accepted: probe frame
+  literal vs contracts file (frozen v1 grammar), 6 s stuck-guard has no
+  automated coverage (documented gap for 0.x).
+
+## Review verdicts (round 1)
 
 Independent read-only reviews after implementation (implementer excluded;
 full texts in the PR conversation record):

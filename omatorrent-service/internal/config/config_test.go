@@ -61,6 +61,19 @@ func TestExplicitMissingFileIsError(t *testing.T) {
 	}
 }
 
+// A symlinked config is refused (O_NOFOLLOW), even when the target has
+// safe permissions.
+func TestRejectsSymlinkedConfig(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.json")
+	os.WriteFile(real, []byte(`{}`), 0o600)
+	link := filepath.Join(dir, "service.json")
+	os.Symlink(real, link)
+	if _, err := Load(link); err == nil {
+		t.Fatal("symlinked config accepted")
+	}
+}
+
 func TestEnvVarPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.json")

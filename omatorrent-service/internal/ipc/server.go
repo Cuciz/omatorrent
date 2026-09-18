@@ -207,9 +207,15 @@ func (s *Server) recoverStaleSocket() error {
 	// Liveness probe. ECONNREFUSED is the only "stale" verdict; any
 	// connection attempt that succeeds gets a full hello handshake — a
 	// live omatorrent-service answers and startup is refused. Timeouts
-	// or garbage are ambiguous → refuse.
+	// or garbage are ambiguous → refuse. A connect ENOENT means the
+	// socket vanished mid-probe: re-check once; still-present → refuse.
 	live, err := probeLiveDaemon(s.socketPath)
 	if err != nil {
+		if isNotExistConnect(err) {
+			if _, serr := os.Lstat(s.socketPath); errors.Is(serr, os.ErrNotExist) {
+				return nil // legitimately gone; nothing to recover
+			}
+		}
 		return fmt.Errorf("ipc: refusing ambiguous socket %s: %w", s.socketPath, err)
 	}
 	if live {
@@ -234,7 +240,8 @@ func (s *Server) recoverStaleSocket() error {
 // probeLiveDaemon dials the socket and performs an IPC v1 hello.
 // Returns (true, nil) when a daemon answers with the expected hello;
 // (false, nil) only on ECONNREFUSED (no listener bound); any other
-// outcome is an error (ambiguous).
+// outcome is an error (ambiguous). The answer read is byte-capped at
+// MaxFrame so a garbage-streaming listener cannot grow memory.
 func probeLiveDaemon(path string) (live bool, err error) {
 	conn, err := net.DialTimeout("unix", path, 1500*time.Millisecond)
 	if err != nil {
@@ -249,7 +256,8 @@ func probeLiveDaemon(path string) (live bool, err error) {
 	if _, err := conn.Write([]byte("{\"type\":\"hello\",\"protocol\":1}\n")); err != nil {
 		return false, fmt.Errorf("probe write: %w", err)
 	}
-	line, err := bufio.NewReaderSize(conn, MaxFrame).ReadString('\n')
+	capped := struct{ io.Reader }{io.LimitReader(conn, MaxFrame)}
+	line, err := bufio.NewReaderSize(capped.Reader, MaxFrame).ReadString('\n')
 	if err != nil {
 		return false, fmt.Errorf("probe read: %w", err)
 	}
@@ -265,6 +273,16 @@ func isConnectionRefused(err error) bool {
 		return errors.Is(oerr.Err, syscall.ECONNREFUSED)
 	}
 	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// isNotExistConnect reports a connect failure caused by the socket path
+// disappearing between Lstat and the dial.
+func isNotExistConnect(err error) bool {
+	var oerr *net.OpError
+	if errors.As(err, &oerr) {
+		return errors.Is(oerr.Err, os.ErrNotExist) || errors.Is(oerr.Err, syscall.ENOENT)
+	}
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func sameFile(a, b os.FileInfo) bool {

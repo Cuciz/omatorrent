@@ -518,6 +518,41 @@ func TestSocketSymlinkRefused(t *testing.T) {
 	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("expected symlink refusal, got %v", err)
 	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink was removed or replaced: %v", err)
+	}
+}
+
+// Shutdown must leave a socket that was replaced under the listener in
+// place (identity mismatch → not ours to delete).
+func TestShutdownLeavesReplacedSocket(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	path := filepath.Join(dir, "service.sock")
+	srv, err := New(path, &fakeHandler{health: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	waitForSocket(t, path)
+
+	// Swap the socket for a foreign file while the server runs.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte("not a socket")
+	if err := os.WriteFile(path, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.Close()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("replaced path was removed on shutdown: %v", err)
+	}
+	if string(got) != string(foreign) {
+		t.Fatalf("foreign file was altered on shutdown")
+	}
 }
 
 // A listener that accepts connections but never answers the hello is
