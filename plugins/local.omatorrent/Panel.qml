@@ -339,6 +339,10 @@ Panel {
     backendOk = false
     dlSpeed = 0
     upSpeed = 0
+    // A snapshot interrupted by the disconnect must not leave the
+    // stale applyingSnapshot flag set: deltas on the next session
+    // would skip view rebuilds (issue #12 hardening).
+    applyingSnapshot = false
     // Never carry optimistic state across a connection loss: the fresh
     // snapshot after resubscribe is the truth (ADR-0006 client rules).
     // Early-result buffers die with the connection too — a mutation id
@@ -981,20 +985,27 @@ Panel {
           }
         }
 
-        // ---- Torrent list.
-        ListView {
+        // ---- Torrent list. Fixed-height area so the empty/degraded
+        //      overlays have a surface even when the list is empty
+        //      (a ListView sized by contentHeight collapses to zero
+        //      at count 0 and swallows centered children — the
+        //      pre-0.5.1 "No torrents" message never actually showed).
+        Item {
           visible: !root.settingsOpen
-          id: listView
           width: parent.width
-          height: Math.min(contentHeight, Style.space(340))
-          spacing: Style.space(2)
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-          interactive: contentHeight > height
+          height: Style.space(340)
 
-          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+          ListView {
+            id: listView
+            anchors.fill: parent
+            spacing: Style.space(2)
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
 
-          model: ListModel { id: view }
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+            model: ListModel { id: view }
 
           delegate: Item {
             width: ListView.view.width
@@ -1104,8 +1115,10 @@ Panel {
               }
             }
           }
+        }
 
-          // Empty / degraded states.
+          // Empty / degraded states (overlays on the fixed list area,
+          // not children of the ListView).
           // Brand empty state (docs/BRAND.md): the plant metaphor lives
           // HERE ONLY — glyph, wordmark, one line of copy, one action.
           Column {
