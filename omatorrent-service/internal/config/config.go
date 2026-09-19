@@ -116,7 +116,7 @@ func Load(explicit string) (Config, error) {
 		// Fail closed: no silent acceptance of plaintext credentials
 		// (ADR-0009). Local-bypass setups carry no password; remote
 		// users re-enter it once via the connection settings surface.
-		return cfg, fmt.Errorf("config: %s: the qbittorrent.password field is no longer supported (stored in the Secret Service since Phase 0.5) — remove it and configure credentials via OmaTorrent's connection settings", path)
+		return cfg, fmt.Errorf("config: %s: the qbittorrent.password field is no longer supported (stored in the Secret Service since Phase 0.5) — remove it and configure credentials via Sprout's connection settings", path)
 	}
 	if fileCfg.QBittorrent.URL != "" {
 		cfg.QBittorrent.URL = fileCfg.QBittorrent.URL

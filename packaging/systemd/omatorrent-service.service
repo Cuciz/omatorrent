@@ -1,5 +1,5 @@
 [Unit]
-Description=OmaTorrent service daemon
+Description=Sprout service daemon (omatorrent)
 Documentation=https://github.com/Cuciz/omatorrent
 After=network.target
 
