@@ -45,6 +45,14 @@ ShellRoot {
   property bool renameTestDone: false
   property bool orderingTestDone: false
 
+  // ---- v1.3 dashboard stages: one dashboard.status exchange between
+  // system.status and torrent.subscribe (lockstep), exact-key schema
+  // validation, and a truthfulness cross-check of counts.total against
+  // the v1.1 snapshot item count.
+  property int dashOk: 0
+  property var dashCounts: null
+  property bool dashModelDone: false
+
   // ---- v1.2 mutation stages (all against a disposable torrent).
   property string ghostHash: ""   // random 40-hex: never resolvable, no data
   property int mutStage: 0        // 0=waiting for snapshot; advance via mutStep()
@@ -68,6 +76,14 @@ ShellRoot {
     pendingId = nextId++
     pendingSince = Date.now()
     send({ type: "system.status", id: pendingId })
+  }
+
+  function requestDashboard() {
+    if (pendingKind !== "" || dashOk > 0) return
+    pendingKind = "dashboard"
+    pendingId = nextId++
+    pendingSince = Date.now()
+    send({ type: "dashboard.status", id: pendingId })
   }
 
   function requestSubscribe() {
@@ -333,6 +349,61 @@ ShellRoot {
         pendingId = -1
         matched++
         print("OTQS-READ: " + line)
+        // Lockstep chain: status -> dashboard.status -> subscribe.
+        if (dashOk === 0) requestDashboard()
+        else if (!subscribed) requestSubscribe()
+        break
+      case "dashboard.status":
+        if (pendingKind !== "dashboard" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingKind = ""
+        pendingId = -1
+        if (msg.qbittorrent !== "ok") {
+          print("OTQS-FAIL dashboard.status degraded (qbittorrent=" + msg.qbittorrent + ") — live shape required for the schema check")
+          Qt.quit()
+          break
+        }
+        // Exact live-shape key set (ADR-0007).
+        {
+          const keys = Object.keys(msg).sort().join(",")
+          const wantBase = "active,aggregate,app_version,counts,dl_speed,id,protocol,qbittorrent,type,up_speed,webapi_version"
+          const wantFs = "active,aggregate,app_version,counts,dl_speed,free_space,id,protocol,qbittorrent,type,up_speed,webapi_version"
+          if (keys !== wantBase && keys !== wantFs) {
+            print("OTQS-FAIL dashboard.status key set: " + keys + " want " + wantBase + " or " + wantFs)
+            Qt.quit()
+            break
+          }
+          const ck = Object.keys(msg.counts).sort().join(",")
+          const cw = "active,completed,downloading,paused,seeding,total"
+          const ak = Object.keys(msg.aggregate).sort().join(",")
+          const aw = "completed_bytes,remaining_bytes,total_size"
+          if (ck !== cw || ak !== aw) {
+            print("OTQS-FAIL dashboard nested keys: counts=" + ck + " aggregate=" + ak)
+            Qt.quit()
+            break
+          }
+          if (!Array.isArray(msg.active) || msg.active.length > 5 || msg.active.length > msg.counts.active) {
+            print("OTQS-FAIL dashboard active list: len=" + (msg.active ? msg.active.length : "null") + " active=" + msg.counts.active)
+            Qt.quit()
+            break
+          }
+          if (msg.aggregate.remaining_bytes < 0 || msg.aggregate.completed_bytes > msg.aggregate.total_size) {
+            print("OTQS-FAIL dashboard aggregate invariant: " + JSON.stringify(msg.aggregate))
+            Qt.quit()
+            break
+          }
+          for (let i = 0; i < msg.active.length; i++) {
+            const it = msg.active[i]
+            const ik = Object.keys(it).sort().join(",")
+            if (ik !== "dlspeed,name,progress,state,upspeed") {
+              print("OTQS-FAIL dashboard active[" + i + "] keys: " + ik)
+              Qt.quit()
+              break
+            }
+          }
+        }
+        dashCounts = msg.counts
+        dashOk++
+        print("OTQS-DASH ok total=" + msg.counts.total + " active=" + msg.counts.active + " activeList=" + msg.active.length)
         if (!subscribed) requestSubscribe()
         break
       case "torrent.subscribed":
@@ -351,6 +422,14 @@ ShellRoot {
       case "torrent.snapshot.end":
         snapshotEnd++
         print("OTQS-SNAPSHOT items=" + snapshotItems)
+        // Truthfulness cross-check: the daemon's aggregate total and the
+        // delivered snapshot must agree (same committed generation
+        // neighborhood; no mutations have run yet at this point).
+        if (dashCounts === null || dashCounts.total !== snapshotItems) {
+          print("OTQS-FAIL dashboard counts.total=" + (dashCounts ? dashCounts.total : "none") + " != snapshot items=" + snapshotItems)
+          Qt.quit()
+          break
+        }
         if (runId === "") runId = String(Date.now())
         ghostHash = genHash()
         mutStage = 1
@@ -407,8 +486,72 @@ ShellRoot {
     }
   }
 
+  // Deterministic dashboard model check mirroring Dashboard.qml's frame
+  // guards (same defensive typeof checks the overlay uses): ok frame,
+  // degraded-with-last-known, degraded-never-synced, and malformed
+  // payloads must each produce exactly the guarded display state.
+  function runDashModelTest() {
+    const errs = []
+    function applyFrame(st, msg) {
+      // Mirrors Dashboard.qml handleLine "dashboard.status" branch.
+      if (typeof msg.id !== "number" || msg.id !== st.pendingId) return st
+      st.pendingId = -1
+      st.daemonUp = true
+      if (msg.qbittorrent === "ok") {
+        st.live = true
+        st.haveLastKnown = false
+        st.appVersion = typeof msg.app_version === "string" ? msg.app_version : ""
+        st.dlSpeed = typeof msg.dl_speed === "number" ? msg.dl_speed : 0
+        st.freeSpace = typeof msg.free_space === "number" ? msg.free_space : undefined
+        st.counts = msg.counts && typeof msg.counts === "object" ? msg.counts : ({})
+        st.aggregate = msg.aggregate && typeof msg.aggregate === "object" ? msg.aggregate : ({})
+        st.active = Array.isArray(msg.active) ? msg.active : []
+      } else {
+        st.live = false
+        st.dlSpeed = 0
+        st.freeSpace = undefined
+        st.active = []
+        if (msg.last_known && typeof msg.last_known === "object") {
+          st.haveLastKnown = true
+          st.counts = msg.last_known.counts && typeof msg.last_known.counts === "object" ? msg.last_known.counts : ({})
+          st.aggregate = msg.last_known.aggregate && typeof msg.last_known.aggregate === "object" ? msg.last_known.aggregate : ({})
+        } else {
+          st.haveLastKnown = false
+          st.counts = ({})
+          st.aggregate = ({})
+        }
+      }
+      return st
+    }
+    let st
+    st = applyFrame({ pendingId: 7 }, { type: "dashboard.status", id: 7, qbittorrent: "ok", app_version: "v5.2.3",
+      dl_speed: 5, up_speed: 0, counts: { total: 2, active: 1 }, aggregate: { total_size: 10, completed_bytes: 4, remaining_bytes: 6 },
+      active: [{ name: "a", state: "downloading", progress: 0.5, dlspeed: 5, upspeed: 0 }] })
+    if (!st.live || st.dlSpeed !== 5 || st.freeSpace !== undefined || st.counts.total !== 2 || st.active.length !== 1)
+      errs.push("ok frame guards wrong: " + JSON.stringify(st))
+    st = applyFrame({ pendingId: 8 }, { type: "dashboard.status", id: 8, qbittorrent: "unavailable",
+      last_known: { counts: { total: 3 }, aggregate: { total_size: 9 } } })
+    if (st.live || !st.haveLastKnown || st.dlSpeed !== 0 || st.freeSpace !== undefined || st.counts.total !== 3 || st.active.length !== 0)
+      errs.push("degraded last_known guards wrong: " + JSON.stringify(st))
+    st = applyFrame({ pendingId: 9 }, { type: "dashboard.status", id: 9, qbittorrent: "unavailable" })
+    if (st.live || st.haveLastKnown || st.counts.total !== undefined)
+      errs.push("never-synced guards wrong: " + JSON.stringify(st))
+    st = applyFrame({ pendingId: 10 }, { type: "dashboard.status", id: 10, qbittorrent: "ok" })
+    if (!st.live || st.counts.total !== undefined || st.active.length !== 0)
+      errs.push("minimal ok frame guards wrong: " + JSON.stringify(st))
+    st = applyFrame({ pendingId: 11 }, { type: "dashboard.status", id: 99, qbittorrent: "ok" })
+    if (st.pendingId !== 11)
+      errs.push("foreign id applied")
+    if (errs.length) {
+      print("OTQS-FAIL dash-model: " + errs.join("; "))
+      return
+    }
+    print("OTQS-DASHMODEL-OK")
+    dashModelDone = true
+  }
+
   function maybeDone() {
-    if (matched >= 2 && snapshotBegin === 1 && snapshotEnd === 1 && renameTestDone && orderingTestDone && mutPass >= mutTotal) {
+    if (matched >= 2 && dashOk >= 1 && dashModelDone && snapshotBegin === 1 && snapshotEnd === 1 && renameTestDone && orderingTestDone && mutPass >= mutTotal) {
       print("OTQS-DONE")
       Qt.quit()
     }
@@ -431,6 +574,7 @@ ShellRoot {
     repeat: true
     onTriggered: {
       if (!root.renameTestDone) root.runRenameModelTest()
+      if (!root.dashModelDone) root.runDashModelTest()
       if (!root.orderingTestDone) root.runOrderingTests()
       root.mutStep()
       root.maybeDone()
@@ -461,12 +605,14 @@ snap=$(grep -c 'OTQS-SNAPSHOT' "$DIR/out.log" || true)
 rename=$(grep -c 'OTQS-RENAME-OK' "$DIR/out.log" || true)
 ordering=$(grep -c 'OTQS-ORDERING-OK' "$DIR/out.log" || true)
 mut=$(grep -c 'OTQS-MUT stage' "$DIR/out.log" || true)
+dash=$(grep -c 'OTQS-DASH ok' "$DIR/out.log" || true)
+dashmodel=$(grep -c 'OTQS-DASHMODEL-OK' "$DIR/out.log" || true)
 fail=$(grep -c 'OTQS-FAIL' "$DIR/out.log" || true)
 doneMarker=$(grep -c 'OTQS-DONE' "$DIR/out.log" || true)
 
-echo "matched-status=$status subscribed=$subd snapshots=$snap rename-model=$rename ordering=$ordering mutation-stages=$mut/10 failures=$fail"
-if [ "$fail" -eq 0 ] && [ "$doneMarker" -ge 1 ] && [ "$subd" -ge 1 ] && [ "$rename" -ge 1 ] && [ "$ordering" -ge 1 ] && [ "$mut" -ge 10 ]; then
-  echo "PASS: one-in-flight discipline + v1.1 snapshot + rename model + v1.2 mutation lifecycle (disposable torrent, both delete_files paths, duplicate/replay/invalid/stale rejections) + deterministic frame-ordering tests (both legal orders, all actions)"
+echo "matched-status=$status dashboard=$dash dash-model=$dashmodel subscribed=$subd snapshots=$snap rename-model=$rename ordering=$ordering mutation-stages=$mut/10 failures=$fail"
+if [ "$fail" -eq 0 ] && [ "$doneMarker" -ge 1 ] && [ "$dash" -ge 1 ] && [ "$dashmodel" -ge 1 ] && [ "$subd" -ge 1 ] && [ "$rename" -ge 1 ] && [ "$ordering" -ge 1 ] && [ "$mut" -ge 10 ]; then
+  echo "PASS: one-in-flight discipline + v1.3 dashboard schema/truthfulness + dashboard model guards + v1.1 snapshot + rename model + v1.2 mutation lifecycle (disposable torrent, both delete_files paths, duplicate/replay/invalid/stale rejections) + deterministic frame-ordering tests (both legal orders, all actions)"
   exit 0
 fi
 echo "FAIL: expected OTQS-DONE with subscribed + rename-model + 10 mutation stages and no OTQS-FAIL"
