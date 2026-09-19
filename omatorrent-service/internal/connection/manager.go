@@ -339,16 +339,19 @@ func (m *Manager) Test(ctx context.Context, p TestParams) TestResult {
 	// qBittorrent's 5-attempt IP ban. One per window; excess is refused
 	// without any backend contact.
 	if p.Username != "" && fetcher != nil {
+		// Check-and-stamp in ONE critical section (security re-review
+		// F2): two separate acquisitions let concurrent credentialed
+		// tests both pass the gate before either stamps.
 		m.mu.Lock()
 		waiting := m.testPace > 0 && time.Since(m.testLoginAt) < m.testPace
+		if !waiting {
+			m.testLoginAt = time.Now()
+		}
 		m.mu.Unlock()
 		if waiting {
 			return TestResult{Status: StatusAuthRequired, Host: truncateRunes(ep.Host, 128), Transport: ep.Scheme,
 				Detail: "login attempts throttled — try again in a few seconds"}
 		}
-		m.mu.Lock()
-		m.testLoginAt = time.Now()
-		m.mu.Unlock()
 	}
 
 	client, err := qbittorrent.NewConfigurable(qbittorrent.ClientConfig{

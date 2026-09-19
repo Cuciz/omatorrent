@@ -341,6 +341,43 @@ Rollback runs only for what actually mutated (`secretMutated` /
 restored); a SaveStore failure restores only the secret; a post-persist
 failure restores secret AND raw store bytes.
 
+### Final re-review verdicts (on the actual diff, all seven mandatory
+questions answered)
+
+- **Architecture: PASS-WITH-FINDINGS** — line-by-line source trace
+  confirmed BeginSwitch (manager.go:582) precedes the raw store
+  snapshot (:619), the secret snapshot (:635) and state-dependent TLS
+  resolution (:650); Phase A verified genuinely state-free; all eight
+  post-BeginSwitch failure returns covered by the deferred guard;
+  rollback flags exactly timed. Seven mandatory questions: all
+  favorable. Findings: F1 MEDIUM — the winner's in-MEMORY state was
+  committed AFTER the drain released (same stale-state class, opposite
+  end of the transaction) → FIXED (activation now entirely under the
+  drain; CommitSwap is the literal last step); F2 doc-attribution →
+  FIXED; F3 INFO (failed-Store-atomicity assumption, documented).
+- **Security (adversarial): PASS-WITH-FINDINGS** — all seven mandatory
+  questions favorable; exhaustive interleaving analysis (winner fails
+  at each phase), stale-trust analysis (offered cache is
+  fingerprint-exact; the pin is an identity lock that concurrent tests
+  cannot widen), seam-pollution analysis (test-only, no production
+  path), round-2 guarantees re-verified. Independently reproduced the
+  old-ordering failures in a detached worktree (all three exclusivity
+  tests FAIL on the 0b2ed7f ordering, PASS on the fix). Findings: F1
+  MEDIUM = the same in-memory window (verified fixed by the follow-up
+  commit; exclusivity suite re-run green there); F2 LOW pre-existing
+  pacing check-then-set race → FIXED (check-and-stamp now one critical
+  section); F3–F5 INFO (documented assumptions; one unreproduced
+  mutate-suite flake under parallel load, package untouched by this
+  diff — noted as a watch item, not chased in this task).
+- **QA (independent reproduction): PASS 9/9** — full race suite,
+  deterministic regression (and the old-head failure reproduced
+  VERBATIM in a clean worktree: "STALE ROLLBACK: T1 committed B, but
+  after T2's failure the persisted profile is … — a committed
+  activation was rolled back"), exclusivity + pin suites, all eight
+  round-2 suites, source-line ordering proof (582 < 619 < 635 < 650),
+  smoke OTQS-DONE (10/10 + 4/4), plugins ×2, harness 82/82, guard
+  39/39, journal secret grep 0, repo scans clean, live daemon healthy.
+
 New/changed tests: `TestDeterministicStaleSnapshotConcurrency`
 (the proof), `TestConfigureExclusiveUnderDrain` (strengthened with the
 `readStoreRawFn` spy + provider counters + epoch/profile assertions),
