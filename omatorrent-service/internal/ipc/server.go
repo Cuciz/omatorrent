@@ -713,12 +713,16 @@ func (c *connIO) cancelSubLocked() {
 	}
 }
 
-// writer drains the outbound queue to the socket, then closes it.
+// writer drains the outbound queue to the socket, then closes it. A
+// failed write tears the connection down immediately so a blocked
+// sendBlocking (snapshot backpressure) unblocks instead of spinning to
+// its deadline.
 func (c *connIO) writer() {
 	for f := range c.out {
 		c.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 		if _, err := c.conn.Write(f); err != nil {
-			break
+			c.teardown()
+			return
 		}
 	}
 	c.conn.Close()

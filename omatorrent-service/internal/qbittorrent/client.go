@@ -167,7 +167,14 @@ func (c *Client) getText(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(body)), nil
+	v := strings.TrimSpace(string(body))
+	// Wire-budget defense: version strings land in IPC frames capped at
+	// 4096 bytes; a misbehaving endpoint returning megabytes must not
+	// breach that (review finding).
+	if r := []rune(v); len(r) > 64 {
+		v = string(r[:64])
+	}
+	return v, nil
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {

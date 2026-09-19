@@ -153,6 +153,29 @@ Eight findings addressed (head 0da831f → fixed):
    ALL benchmarks re-run with real numbers (see the corrected table
    above — materially higher at 1,000; claims updated everywhere).
 
+## Re-review verdicts (round 3, after the eight fixes)
+
+All three reviewers verified all 8 findings FIXED against head e8fec7c:
+
+- **Architecture: APPROVE-WITH-NOTES.** All 8 FIXED with file:line
+  evidence; QML snapshot path confirmed O(N log N); no silent-loss
+  path; 1,000-torrent snapshot cannot disconnect via queue overflow;
+  standing invariants re-checked (QML purity, contract consistency,
+  no mutations, stdlib-only).
+- **Security: PASS-WITH-FINDINGS** (new items LOW/INFO only, all
+  applied post-review: numeric coercion for QML row fields, version-
+  string cap at the adapter (64 runes — closes the one >4096-byte
+  frame corner, pre-existing from v1.0), writer-fails-fast teardown
+  (bounded shutdown latency), removed-hash length guard in
+  EncodeDeltas, dead duplicate case label removed). Race suite, frame
+  bounds, bounded memory, no-mutation, no-secrets all re-verified by
+  execution.
+- **QA: READY-FOR-REVIEW.** All 10 checks re-run PASS; the seven named
+  fix-round tests confirmed present and passing under -race;
+  benchmarks independently reproduced within run-to-run noise
+  (full-rebuild +18-22% in the reviewer's run — documented numbers are
+  the implementer's measurements, asymptotics identical).
+
 ## Known limitations
 
 - Live qBittorrent restart resync not exercised against the user's real

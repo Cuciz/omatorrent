@@ -198,10 +198,10 @@ Panel {
       name: t.name,
       state: t.state,
       progress: t.progress,
-      dlspeed: t.dlspeed || 0,
-      upspeed: t.upspeed || 0,
-      eta: t.eta,
-      ratio: t.ratio || 0
+      dlspeed: (typeof t.dlspeed === "number" && isFinite(t.dlspeed)) ? t.dlspeed : 0,
+      upspeed: (typeof t.upspeed === "number" && isFinite(t.upspeed)) ? t.upspeed : 0,
+      eta: (typeof t.eta === "number" && isFinite(t.eta)) ? t.eta : 8640000,
+      ratio: (typeof t.ratio === "number" && isFinite(t.ratio)) ? t.ratio : 0
     }
   }
 
@@ -264,7 +264,6 @@ Panel {
           for (let i = 0; i < msg.removed.length; i++) applyRemoved(msg.removed[i])
         }
         break
-      case "torrent.subscribed":
       case "error":
         break
       case "torrent.snapshot.end":

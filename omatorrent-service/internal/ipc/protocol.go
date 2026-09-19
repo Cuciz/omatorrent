@@ -204,6 +204,9 @@ func EncodeDeltas(ev DeltaEvent) (frames [][]byte, ok bool) {
 		size += len(b)
 	}
 	for _, h := range ev.Removed {
+		if len(h) > 64 {
+			return nil, false // defense in depth: hashes are 40/64 hex
+		}
 		if size+len(h)+16 > budget && (len(changed) > 0 || len(removed) > 0) {
 			flush()
 			size = 0
