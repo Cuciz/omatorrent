@@ -1,0 +1,1 @@
+{"type":"dashboard.status","protocol":1,"id":9,"qbittorrent":"unavailable","last_known":{"app_version":"v5.2.3","webapi_version":"2.15.1","counts":{"total":3,"active":0,"downloading":0,"seeding":1,"paused":2,"completed":1},"aggregate":{"total_size":3221225472,"completed_bytes":1073741824,"remaining_bytes":2147483648}}}

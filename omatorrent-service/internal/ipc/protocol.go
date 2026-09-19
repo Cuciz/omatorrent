@@ -186,6 +186,177 @@ type mutationResultIDResponse struct {
 	Status   string `json:"status"`
 }
 
+// ---- v1.3 dashboard aggregates (ADR-0007) ----
+
+// DashboardCounts is the torrent population summary (classification
+// semantics pinned by ADR-0007; counts are not expected to sum to
+// total — queued/checking/error/moving/other are inside total only).
+type DashboardCounts struct {
+	Total       int `json:"total"`
+	Active      int `json:"active"`
+	Downloading int `json:"downloading"`
+	Seeding     int `json:"seeding"`
+	Paused      int `json:"paused"`
+	Completed   int `json:"completed"`
+}
+
+// DashboardAggregate is the current data summary in bytes (saturating
+// sums computed by the state layer).
+type DashboardAggregate struct {
+	TotalSize      int64 `json:"total_size"`
+	CompletedBytes int64 `json:"completed_bytes"`
+	RemainingBytes int64 `json:"remaining_bytes"`
+}
+
+// dashboardActiveItem is one entry of the "transferring now" list:
+// current state only, never history.
+type dashboardActiveItem struct {
+	Name     string  `json:"name"`
+	State    string  `json:"state"`
+	Progress float64 `json:"progress"`
+	DlSpeed  int64   `json:"dlspeed"`
+	UpSpeed  int64   `json:"upspeed"`
+}
+
+// DashboardActiveItem is the state-layer-mirrored active entry (main
+// adapts state.DashboardActiveItem to these).
+type DashboardActiveItem struct {
+	Name     string
+	State    string
+	Progress float64
+	DlSpeed  int64
+	UpSpeed  int64
+}
+
+// dashboardStatusOKResponse is the live shape. free_space is present
+// iff the backend has reported it (pointer, so 0 bytes is a real value;
+// nil means unknown and is omitted — ADR-0007).
+type dashboardStatusOKResponse struct {
+	Type          string                `json:"type"`
+	Protocol      int64                 `json:"protocol"`
+	ID            int64                 `json:"id"`
+	QBittorrent   string                `json:"qbittorrent"`
+	AppVersion    string                `json:"app_version"`
+	WebAPIVersion string                `json:"webapi_version"`
+	DlSpeed       int64                 `json:"dl_speed"`
+	UpSpeed       int64                 `json:"up_speed"`
+	FreeSpace     *int64                `json:"free_space,omitempty"`
+	Counts        DashboardCounts       `json:"counts"`
+	Aggregate     DashboardAggregate    `json:"aggregate"`
+	Active        []dashboardActiveItem `json:"active"`
+}
+
+// dashboardLastKnown carries last-known-good counts/aggregate/versions
+// while the backend is unreachable (speeds and the active list are NOT
+// included: unknown, and fake zeroes are forbidden).
+type dashboardLastKnown struct {
+	AppVersion    string             `json:"app_version"`
+	WebAPIVersion string             `json:"webapi_version"`
+	Counts        DashboardCounts    `json:"counts"`
+	Aggregate     DashboardAggregate `json:"aggregate"`
+}
+
+// dashboardStatusDegradedResponse is the degraded shape; last_known is
+// present iff at least one sync cycle ever committed.
+type dashboardStatusDegradedResponse struct {
+	Type        string              `json:"type"`
+	Protocol    int64               `json:"protocol"`
+	ID          int64               `json:"id"`
+	QBittorrent string              `json:"qbittorrent"`
+	LastKnown   *dashboardLastKnown `json:"last_known,omitempty"`
+}
+
+// DashboardLastKnownData is the degraded-shape payload.
+type DashboardLastKnownData struct {
+	AppVersion    string
+	WebAPIVersion string
+	Counts        DashboardCounts
+	Aggregate     DashboardAggregate
+}
+
+// DashboardData is the v1.3 payload the handler supplies, computed from
+// committed state (ADR-0007). ok=false serves the degraded shape;
+// LastKnown != nil adds the last-known-good object.
+type DashboardData struct {
+	AppVersion    string
+	WebAPIVersion string
+	DlSpeed       int64
+	UpSpeed       int64
+	FreeSpace     *int64
+	Counts        DashboardCounts
+	Aggregate     DashboardAggregate
+	Active        []DashboardActiveItem
+	LastKnown     *DashboardLastKnownData
+}
+
+// Active-name wire cap and the frame budget headroom for the ok shape
+// (ADR-0007: names capped at 48 runes; pathological names halve, then
+// trailing active entries drop — counts.active stays truthful).
+const (
+	dashboardActiveNameCapRunes = 48
+	dashboardFrameBudget        = 3800
+)
+
+// EncodeDashboardStatus encodes the v1.3 response. The degraded shape
+// carries no names and always fits; the ok shape is guarded against the
+// frame budget by name-halving and then trailing-entry drops.
+func EncodeDashboardStatus(id int64, ok bool, d DashboardData) []byte {
+	if !ok {
+		resp := dashboardStatusDegradedResponse{
+			Type: "dashboard.status", Protocol: ProtocolVersion, ID: id,
+			QBittorrent: "unavailable",
+		}
+		if d.LastKnown != nil {
+			resp.LastKnown = &dashboardLastKnown{
+				AppVersion:    d.LastKnown.AppVersion,
+				WebAPIVersion: d.LastKnown.WebAPIVersion,
+				Counts:        d.LastKnown.Counts,
+				Aggregate:     d.LastKnown.Aggregate,
+			}
+		}
+		return mustMarshal(resp)
+	}
+
+	nameCap := dashboardActiveNameCapRunes
+	items := make([]dashboardActiveItem, len(d.Active))
+	for {
+		for i, it := range d.Active {
+			items[i] = dashboardActiveItem{
+				Name:     capString(it.Name, nameCap),
+				State:    it.State,
+				Progress: it.Progress,
+				DlSpeed:  it.DlSpeed,
+				UpSpeed:  it.UpSpeed,
+			}
+		}
+		cur := items[:len(items)]
+		if len(cur) == 0 {
+			// Always a JSON array, never null.
+			cur = []dashboardActiveItem{}
+		}
+		b := mustMarshal(dashboardStatusOKResponse{
+			Type: "dashboard.status", Protocol: ProtocolVersion, ID: id,
+			QBittorrent: "ok",
+			AppVersion:  d.AppVersion, WebAPIVersion: d.WebAPIVersion,
+			DlSpeed: d.DlSpeed, UpSpeed: d.UpSpeed,
+			FreeSpace: d.FreeSpace,
+			Counts:    d.Counts, Aggregate: d.Aggregate,
+			Active: cur,
+		})
+		if len(b)+1 <= MaxFrame {
+			return b
+		}
+		if nameCap > 12 {
+			nameCap /= 2
+			continue
+		}
+		if len(items) == 0 {
+			return b // unreachable: the base shape fits the budget
+		}
+		items = items[:len(items)-1]
+	}
+}
+
 // MutationRequest is one mutation intent from a client (already
 // schema-validated by parseFrame).
 type MutationRequest struct {
@@ -568,7 +739,7 @@ func parseFrame(frame []byte) (Request, error) {
 		if !hasProtocol || hasID || hasHash || hasURL || hasDelete || hasRef {
 			return Request{}, errInvalid
 		}
-	case "health", "system.status", "torrent.subscribe":
+	case "health", "system.status", "torrent.subscribe", "dashboard.status":
 		if !hasID || hasProtocol || hasHash || hasURL || hasDelete || hasRef {
 			return Request{}, errInvalid
 		}
