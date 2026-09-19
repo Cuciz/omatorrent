@@ -9,7 +9,7 @@ Phase 0.5 MERGED (PR #10 @ merge `6563bd4`, approved head `8f0b515`,
 issue #9 closed; final record docs/agent/PHASE05.md incl. merge SHA
 and the three external-review rounds). **CURRENT MILESTONE:
 0.5.1 — SPROUT REBRAND IMPLEMENTED** (branch
-`feat/phase051-sprout-rebrand`, issue #11, PR #12 OPEN — NOT merged;
+`feat/phase051-sprout-rebrand`, issue #11, investigation issue #12, PR pending;
 brand spec docs/BRAND.md, evidence docs/agent/PHASE051.md; technical
 identifiers NOT renamed — pre-1.0 migration list in BRAND.md). After
 merge, the next milestone is 0.6 (torrent controls; NOT started).
