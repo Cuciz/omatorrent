@@ -44,8 +44,21 @@ measurements:
 | Benchmark (measured) | 10 | 100 | 1,000 |
 |---|---|---|---|
 | Daemon full rebuild cycle | 77 µs | 767 µs | **8.09 ms** (858 KB, 12k allocs) |
-| Daemon delta cycle (10 changed) | 54 µs | 72 µs | **375 µs** (91 allocs — O(delta), constant in N) |
-| Daemon state read (map clone) | 2.7 µs | 17 µs | **347 µs** (O(N) clone per read) |
+| Daemon delta cycle (10 changed) | 54 µs | 72 µs | **375 µs** |
+| Daemon state read (map clone) | 2.7 µs | 17 µs | **347 µs** |
+
+Delta-cycle cost, stated precisely (copy-on-write state model): the
+cycle clones the previous torrent map before applying a delta
+(`cloneTorrents`), so the **algorithmic complexity is O(N + delta)** —
+linear in the total torrent count plus the change size — not O(delta).
+The **allocation count** on this path is constant (~91, dominated by
+decoding the 10 changed items) because the clone is a single map
+allocation, but the **bytes allocated scale with N** (~30 KB at 10,
+~81 KB at 100, ~303 KB at 1000). The **measured wall-clock** figures
+above (~54–375 µs) grow with N accordingly. The measured ~375 µs at
+1,000 torrents is acceptable for Phase 0.2; no optimization was made.
+State reads clone the committed map per read: O(N) time and bytes, 4-6
+allocs.
 
 IPC (measured, TestIPCMetrics): snapshot frames = N+3 (subscribed +
 begin + N items + end); largest encoded item frame 283–290 B; a

@@ -48,7 +48,7 @@ changes; v1 clients that never send the new request see no difference
 ### Normalized torrent item schema (identical in snapshot.item and delta)
 
 ```json
-{"hash":"…40 hex…","name":"…","state":"downloading","progress":0.42,
+{"hash":"…40 or 64 hex…","name":"…","state":"downloading","progress":0.42,
  "dlspeed":0,"upspeed":0,"eta":86400,"ratio":1.5,"category":"…",
  "size":0,"completed":0}
 ```
@@ -60,7 +60,8 @@ changes; v1 clients that never send the new request see no difference
 - `eta` seconds (8640000 sentinel for ∞); `progress` 0..1; numbers are
   integers except progress/ratio.
 - `name` is capped at 512 UTF-8 runes (documented truncation for the
-  frame budget); `hash` is 40 hex chars.
+  frame budget); `hash` is 40 or 64 hexadecimal characters
+  (BitTorrent v1/v2 infohash).
 - No qBittorrent-version, path, tracker, or secret data crosses the IPC.
 
 ### Delivery and flow control (amended from review)

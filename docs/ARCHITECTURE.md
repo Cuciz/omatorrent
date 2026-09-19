@@ -68,7 +68,9 @@ mutable state.
   gone: system.status speeds/count come from the sync cache.
 - IPC v1.1 (ADR-0005): `torrent.subscribe` → subscribed + bounded
   snapshot frames (begin/item/end) + `torrent.delta` pushes (seq'd,
-  chunked ≤ 4096 B, slow consumers disconnected via a 256-frame queue);
+  chunked ≤ 4096 B; the initial snapshot is delivered with backpressure
+  while live deltas use a bounded 256-frame queue — slow consumers are
+  disconnected);
   v1.0 shapes untouched. Server writes are serialized per connection
   through one writer goroutine.
 - Panel `plugins/local.omatorrent/Panel.qml`: native popout

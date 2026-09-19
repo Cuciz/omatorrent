@@ -113,7 +113,7 @@ Then, immediately, the full state as bounded frames (each ≤ 4096 bytes
 incl. LF; ordering guaranteed per connection):
 ```json
 {"type":"torrent.snapshot.begin","protocol":1,"id":3,"count":2}
-{"type":"torrent.snapshot.item","protocol":1,"id":3,"index":0,"torrent":{"hash":"…40 hex…","name":"…","state":"seeding","progress":1,"dlspeed":0,"upspeed":51200,"eta":8640000,"ratio":2.1,"category":"","size":1048576,"completed":1048576}}
+{"type":"torrent.snapshot.item","protocol":1,"id":3,"index":0,"torrent":{"hash":"…40 or 64 hex…","name":"…","state":"seeding","progress":1,"dlspeed":0,"upspeed":51200,"eta":8640000,"ratio":2.1,"category":"","size":1048576,"completed":1048576}}
 {"type":"torrent.snapshot.item","protocol":1,"id":3,"index":1,"torrent":{…}}
 {"type":"torrent.snapshot.end","protocol":1,"id":3}
 ```
@@ -132,7 +132,7 @@ contain gaps; it identifies ordering, not per-subscription counting.
 
 | Key | Type | Meaning |
 |---|---|---|
-| hash | string | 40 hex chars |
+| hash | string | 40 or 64 hexadecimal characters (BitTorrent v1/v2 infohash) |
 | name | string | capped at 512 UTF-8 runes by the daemon |
 | state | string | downloading, seeding, paused, queued, checking, error, moving, other |
 | progress | number | 0..1 |

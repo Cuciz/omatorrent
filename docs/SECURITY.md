@@ -57,7 +57,8 @@ recorded in docs/agent/PHASE0.md per change.
   degraded shapes are returned.
 - v1.1 subscriptions (ADR-0005): read-only; every frame ≤ 4096 bytes
   (snapshot chunked, deltas split, torrent names capped at 512 runes);
-  per-connection outbound queue bounded at 256 frames — a slow or
+  live-delta outbound queue bounded at 256 frames per connection (the
+  initial snapshot uses bounded backpressure instead) — a slow or
   malicious subscriber is disconnected, never able to grow daemon
   memory; no mutation operations exist. Version probes and names never
   include secrets; hashes/names/state only.
