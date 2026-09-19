@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "local.omatorrent-dashboard",
+  "name": "OmaTorrent Dashboard",
+  "version": "0.4.0",
+  "author": "Cuciz",
+  "description": "OmaTorrent current-state dashboard overlay (companion to local.omatorrent).",
+  "kinds": ["overlay"],
+  "entryPoints": { "overlay": "Dashboard.qml" }
+}

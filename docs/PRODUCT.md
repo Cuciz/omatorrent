@@ -37,7 +37,11 @@ intention, changeable without an ADR; [OPEN] = open question.
 
 ## Open questions
 
-- [OPEN] Exact scope split between Panel and Dashboard at 0.1–0.4.
+- [SETTLED 0.4] Scope split: the Panel owns daily-use operations and all
+  mutations; the Dashboard (0.4) is a current-state overview overlay —
+  live transfer, population counts, aggregate data, transferring-now
+  list, navigation to the Panel. History/metrics stay 0.8; storage/VPN
+  views stay 0.6/0.7.
 - [OPEN] Remote qBittorrent configuration UX (0.5+).
 - [OPEN] Product plugin name/namespace on plugins.omarchy.org (observed
   convention: `author.plugin-name`, e.g. `b.okomart`, `local.networks`).

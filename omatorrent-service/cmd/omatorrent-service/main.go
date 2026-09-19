@@ -19,7 +19,7 @@ import (
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/state"
 )
 
-const version = "0.3.0-phase03"
+const version = "0.4.0-phase04"
 
 func main() {
 	var configPath, socketOverride string
@@ -111,6 +111,55 @@ func (h *daemonHandler) StatusData() (ipc.StatusData, bool) {
 		UpSpeed:       st.UpSpeed,
 		TorrentsTotal: len(st.Torrents),
 	}, st.BackendOK
+}
+
+// Dashboard implements the v1.3 surface (ADR-0007): aggregates computed
+// by the state layer from the committed snapshot. Degraded responses
+// carry last-known counts/aggregate iff a cycle ever committed
+// (Generation > 0); speeds/free-space/active are never fabricated.
+func (h *daemonHandler) Dashboard() (ipc.DashboardData, bool) {
+	st := h.syncer.State()
+	agg := state.Aggregate(st)
+	data := ipc.DashboardData{
+		AppVersion:    st.AppVersion,
+		WebAPIVersion: st.WebAPIVersion,
+		DlSpeed:       st.DlSpeed,
+		UpSpeed:       st.UpSpeed,
+		FreeSpace:     agg.FreeSpace,
+	}
+	data.Counts = ipc.DashboardCounts{
+		Total:       agg.Counts.Total,
+		Active:      agg.Counts.Active,
+		Downloading: agg.Counts.Downloading,
+		Seeding:     agg.Counts.Seeding,
+		Paused:      agg.Counts.Paused,
+		Completed:   agg.Counts.Completed,
+	}
+	data.Aggregate = ipc.DashboardAggregate{
+		TotalSize:      agg.Aggregate.TotalSize,
+		CompletedBytes: agg.Aggregate.CompletedBytes,
+		RemainingBytes: agg.Aggregate.RemainingBytes,
+	}
+	for _, it := range agg.Active {
+		data.Active = append(data.Active, ipc.DashboardActiveItem{
+			Name: it.Name, State: it.State, Progress: it.Progress,
+			DlSpeed: it.DlSpeed, UpSpeed: it.UpSpeed,
+		})
+	}
+	if st.BackendOK {
+		return data, true
+	}
+	if st.Generation == 0 {
+		// Never synced: no last-known state exists to show.
+		return ipc.DashboardData{}, false
+	}
+	data.LastKnown = &ipc.DashboardLastKnownData{
+		AppVersion:    st.AppVersion,
+		WebAPIVersion: st.WebAPIVersion,
+		Counts:        data.Counts,
+		Aggregate:     data.Aggregate,
+	}
+	return data, false
 }
 
 // Subscribe implements ipc.Subscriptions from the syncer's committed

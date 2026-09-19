@@ -18,9 +18,12 @@ import (
 // ---- test scaffolding ----
 
 type fakeHandler struct {
-	mu     sync.Mutex
-	health bool
-	status StatusData
+	mu        sync.Mutex
+	health    bool
+	status    StatusData
+	dash      DashboardData
+	dashSet   bool
+	dashCalls int
 }
 
 func (f *fakeHandler) Health() bool {
@@ -35,9 +38,25 @@ func (f *fakeHandler) StatusData() (StatusData, bool) {
 	return f.status, f.health
 }
 
+func (f *fakeHandler) Dashboard() (DashboardData, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dashCalls++
+	if !f.dashSet {
+		return DashboardData{}, f.health
+	}
+	return f.dash, f.health
+}
+
 func (f *fakeHandler) set(ok bool, d StatusData) {
 	f.mu.Lock()
 	f.health, f.status = ok, d
+	f.mu.Unlock()
+}
+
+func (f *fakeHandler) setDash(ok bool, d DashboardData) {
+	f.mu.Lock()
+	f.health, f.dash, f.dashSet = ok, d, true
 	f.mu.Unlock()
 }
 

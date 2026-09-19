@@ -69,6 +69,37 @@ widget exposes open()/close()/toggle()/opened so `omarchy-shell shell
 toggle <id>` works. Reference: /usr/share/omarchy/shell/plugins/panels/
 clock/{BarWidget,Panel}.qml; OmaTorrent's implementation mirrors it.
 
+## Overlay-plugin pattern (verified Phase 0.4, first-party menu model)
+
+- The dashboard is a SEPARATE plugin (`local.omatorrent-dashboard`,
+  `kinds: ["overlay"]`, `entryPoints.overlay`) beside the bar-widget
+  plugin — never add `overlay`/`menu`/`panel` kinds to local.omatorrent
+  itself: `shell.qml isBarWidgetPanelPlugin()` returns false for such
+  plugins, which would silently reroute `omarchy-shell shell toggle
+  local.omatorrent` from the bar-widget panel to the shell's panel
+  loader.
+- Third-party overlay/panel plugins must be listed in
+  `~/.config/omarchy/shell.json` `plugins: [{"id": ...}]` to be
+  summonable (isEnabled→findEntryLocation); bar widgets are enabled via
+  `bar.layout` instead.
+- Host contract: shell injects `shell`, `manifest`, ... and calls
+  `open(payloadJson)` when summoned, `close()` when hiding. `close()`
+  must ONLY flip visibility — calling `shell.hide()` from inside
+  `close()` recurses (observed: RangeError). User-initiated closes
+  (Escape, click-outside) go through a `dismiss()` that calls
+  `shell.hide(pluginId)` (first-party Emojis close/dismiss split).
+- Without `keepLoaded`, the shell's Loader destroys the overlay on hide
+  — sockets/timers die with it (verified: 50× open/close cycles leave
+  daemon fd/socket counts flat). Hidden = zero cost.
+- Layer-shell overlay skeleton needs `import Quickshell.Wayland` for
+  the `WlrLayershell` attached object (namespace/layer/keyboardFocus).
+  Reference: plugins/emojis, plugins/clipboard (scrim + centered
+  BorderSurface + Escape/click-outside).
+- Bar widget → companion overlay: first-party idiom is
+  `bar.run("omarchy-shell shell toggle <plugin-id>")` (menu BarWidget);
+  overlay → bar-widget panel: `shell.summon("local.omatorrent")`
+  (routes through bar.summonBarWidget).
+
 ## IPC client rules (verified against Quickshell 0.3.1)
 
 - Use `Quickshell.Io` `Socket` (QLocalSocket → Unix domain on Linux):
@@ -84,7 +115,11 @@ clock/{BarWidget,Panel}.qml; OmaTorrent's implementation mirrors it.
   plugins/local.omatorrent/BarWidget.qml.
 - **Pitfall 3**: an instantiated bar widget may survive plugin-file
   rescans with stale code; `omarchy-restart-shell` gives a clean state
-  after edits.
+  after edits. Confirmed harder in 0.4: a freshly (re)deployed overlay
+  plugin can fail its FIRST summon after a hot rescan (observed
+  "Non-existent attached object" from a stale component + a shell.qml
+  error-handler ReferenceError masking the real error) — retry once,
+  then restart the shell before diagnosing the QML itself.
 - No shell-side `Socket` usage exists upstream to copy (Omarchy moved its
   own IPC to `IpcHandler`); plugin-side Unix-socket clients are
   legitimate and match ADR-0003/0004.

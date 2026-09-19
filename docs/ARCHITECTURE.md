@@ -56,6 +56,38 @@ mutable state.
   (e.g. `b.okomart`, `local.networks`). OmaTorrent dev ID:
   `local.omatorrent` (public ID OPEN).
 
+## Phase 0.4 as-built (2026-09-19)
+
+- IPC v1.3 (ADR-0007): `dashboard.status` request/response (live +
+  degraded shapes). Every dashboard number is computed daemon-side by
+  `state.Aggregate` over the committed state (O(N + A log A) — one pass
+  over N torrents plus a sort of the A active candidates, worst case
+  O(N log N); saturating sums,
+  classification semantics identical to the panel filters) and served
+  from cache — answering never contacts qBittorrent. `free_space_on_disk`
+  is now committed into normalized state (last-known-good, dropped on
+  degradation — unknown ≠ zero).
+- Dashboard `plugins/local.omatorrent-dashboard/`: a separate
+  overlay-kind plugin (the omarchy.menu model — bar-widget + companion
+  overlay plugins), NOT a kind on local.omatorrent: adding "overlay" to
+  its kinds would flip `omarchy-shell shell toggle local.omatorrent`
+  routing from the bar-widget panel to the shell's panel loader and
+  break summon() of the panel. Summonable via the shell CLI and the
+  panel header button (first-party `bar.run("omarchy-shell shell
+  toggle …")`); the footer opens the panel through the documented host
+  CLI (`Util.execDetached("omarchy-shell shell summon
+  local.omatorrent")`) — the capability-scoped shell API a plugin
+  receives cannot summon OTHER plugins (PluginShellApi gate, review
+  finding). Not keepLoaded:
+  the shell's Loader destroys the overlay (and its IPC connection) on
+  close — a hidden dashboard holds no sockets and runs no timers.
+  Window skeleton is the first-party overlay pattern (emojis/clipboard):
+  full-anchor layer-shell PanelWindow (Overlay layer, Exclusive keyboard
+  focus while open), scrim, centered BorderSurface card with
+  Color.menu/Style tokens; Escape/click-outside close via dismiss()
+  (close() is host-invoked only — calling shell.hide from close()
+  recurses; first-party close/dismiss split).
+
 ## Phase 0.2 as-built (2026-09-18)
 
 - Daemon state: `internal/state.Syncer` owns the sync/maindata loop —

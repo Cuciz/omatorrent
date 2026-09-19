@@ -65,7 +65,7 @@ Baseline: WebAPI 2.0 unless noted. "Live" = verified on 2.15.1 (2026-09-18).
 | Trackers (mutate) | `addTrackers`/`editTracker`/`removeTrackers` | 2.0 / 2.2.0 / 2.2.0 | VERSION DEPENDENT | 0.3+ | wiki |
 | Queue ordering | `torrents/{in,de}creasePrio`, `{top,bottom}Prio` | 2.0 | VERSION DEPENDENT (queueing optional pref) | 0.3+ | wiki |
 | Ratio/seeding limits | `setShareLimits` | 2.0.1 | VERSION DEPENDENT | 0.3+ | wiki |
-| Free space | `server_state.free_space_on_disk` | 2.1.1 | CONFIRMED (live key present) | 0.4+ | wiki + live |
+| Free space | `server_state.free_space_on_disk` | 2.1.1 | CONFIRMED (live key present; value observed ~1.7 TB and served on the wire 0.4) — semantics: free space on the disk of the DEFAULT save path; other save paths are NOT reflected | 0.4 | wiki + live |
 | Preferences (read/set) | `app/preferences`, `app/setPreferences` | 2.0 (fields vary) | CONFIRMED (live read, 223 keys) | 0.4+ | wiki + live |
 | Rename file/folder | `renameFile`/`renameFolder` | 2.4.0 / 2.8.0 | NOT NEEDED BEFORE 1.0 | — | wiki |
 | Peer details | `sync/torrentPeers` | 2.0 | NOT NEEDED BEFORE 1.0 | — | wiki |

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "local.omatorrent",
   "name": "OmaTorrent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Cuciz",
   "description": "qBittorrent transfer status via the omatorrent-service daemon.",
   "kinds": ["bar-widget"],

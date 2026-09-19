@@ -1,7 +1,8 @@
 # OmaTorrent — IPC Contract v1
 
 Status: v1 (ADR-0004) + v1.1 extension (ADR-0005, read-only torrent
-state) + v1.2 extension (ADR-0006, staged mutations). No secrets.
+state) + v1.2 extension (ADR-0006, staged mutations) + v1.3 extension
+(ADR-0007, dashboard aggregates). No secrets.
 Encoding: newline-delimited JSON (NDJSON) — see ADR-0004 for the choice
 vs JSON-RPC/binary framing.
 
@@ -294,6 +295,72 @@ carrying the replaying request's `id` plus the recorded terminal status
   duplicate-protected on modern backends; remove is NEVER retried
   blindly — re-derive from state, then require fresh confirmation.
 
+## v1.3 extension: dashboard aggregates (ADR-0007)
+
+Read-only, current state only (no history — that is Phase 0.8). One
+request type, served exclusively from the daemon's committed state
+(answering never contacts qBittorrent; aggregation over the committed
+torrent map is O(N + A log A) — N torrents plus a sort of the A active
+candidates — with a measured full-response cost of a few milliseconds
+at N = 1 000).
+
+### Request (after hello; exact two keys, like health)
+
+```json
+{"type":"dashboard.status","id":9}
+```
+
+### Response — live (exact key set; `free_space` present iff the
+backend has ever reported it — omitted means unknown, `0` is a real
+value):
+
+```json
+{"type":"dashboard.status","protocol":1,"id":9,"qbittorrent":"ok",
+ "app_version":"v5.2.3","webapi_version":"2.15.1",
+ "dl_speed":1048576,"up_speed":131072,"free_space":50210201600,
+ "counts":{"total":3,"active":1,"downloading":1,"seeding":1,"paused":1,"completed":2},
+ "aggregate":{"total_size":3221225472,"completed_bytes":2147483648,"remaining_bytes":1073741824},
+ "active":[{"name":"A live torrent with a long descriptive name","state":"downloading","progress":0.5,"dlspeed":1048576,"upspeed":4096}]}
+```
+
+Field semantics (definitions live daemon-side; the dashboard is a pure
+renderer — ADR-0007):
+
+| Field | Meaning |
+|---|---|
+| `counts.total` | torrents in committed state |
+| `counts.active` | `dlspeed > 0 || upspeed > 0` (current values) |
+| `counts.downloading`/`seeding`/`paused` | normalized-state equality; `queued`/`checking`/`error`/`moving`/`other` count only toward `total` — counts do NOT sum to `total` |
+| `counts.completed` | `progress >= 1` (same predicate as the panel's Completed filter) |
+| `aggregate.total_size`/`completed_bytes` | saturating sums of per-torrent `size`/`completed` (bytes) |
+| `aggregate.remaining_bytes` | saturating sum of per-torrent `max(0, size − completed)` |
+| `active[]` | the transferring-now list: active torrents, at most 5, combined speed descending, name ascending; current state only, never history; names capped at 48 runes (halved, then trailing entries dropped, if pathological names would exceed the frame budget — `counts.active` always reports the true count) |
+| `free_space` | qBittorrent `server_state.free_space_on_disk` — free space on the disk of the default save path (WebAPI ≥ 2.1.1) |
+
+### Response — degraded (qBittorrent unreachable)
+
+```json
+{"type":"dashboard.status","protocol":1,"id":9,"qbittorrent":"unavailable",
+ "last_known":{"app_version":"v5.2.3","webapi_version":"2.15.1",
+  "counts":{"total":3,"active":0,"downloading":0,"seeding":1,"paused":2,"completed":1},
+  "aggregate":{"total_size":3221225472,"completed_bytes":1073741824,"remaining_bytes":2147483648}}}
+```
+
+`last_known` is present iff at least one sync cycle ever committed;
+before the first sync the degraded response is the bare shape
+(`{"type","protocol","id","qbittorrent"}` only). Speeds, `free_space`
+and `active` are NEVER included while degraded — the daemon does not
+know them and fake zeroes are forbidden. `last_known` values are
+last-known-good and must be presented as such, not as live data.
+
+Client rules: same lockstep discipline as v1.0 (one request in flight,
+id-matched); poll cadence should not exceed 1 Hz; available on the same
+connection alongside v1.0 requests and v1.1 subscriptions. Contract
+fixtures: `contracts/ipc/v1/dashboard-status.txt`,
+`response-dashboard-status.txt`,
+`response-dashboard-status-degraded.txt`,
+`response-dashboard-status-never-synced.txt`.
+
 ## Errors and resource limits
 
 Response shape (then connection closes):
@@ -307,7 +374,7 @@ Response shape (then connection closes):
 | message_too_large | Frame cannot fit in 4096 bytes including LF |
 | handshake_required | A valid message other than hello arrives first |
 | version_mismatch | First hello has an integer protocol other than 1 |
-| unsupported_message | After hello, a valid message type other than health/system.status/torrent.subscribe/torrent.pause/torrent.resume/torrent.add/torrent.remove, including another hello; also a second torrent.subscribe on an already-subscribed connection (error only, connection stays open) |
+| unsupported_message | After hello, a valid message type other than health/system.status/dashboard.status/torrent.subscribe/torrent.pause/torrent.resume/torrent.add/torrent.remove, including another hello; also a second torrent.subscribe on an already-subscribed connection (error only, connection stays open) |
 
 Unknown message types use the type-only shape; adding other fields is
 invalid_message. A hello never carries an id; health/system.status always

@@ -24,11 +24,13 @@ const (
 	writeDeadline     = 5 * time.Second
 )
 
-// Handler supplies backend state for health and system.status. It must be
-// safe for concurrent use and must not block (served from cache).
+// Handler supplies backend state for health, system.status and the
+// v1.3 dashboard aggregates. It must be safe for concurrent use and
+// must not block (served from cache).
 type Handler interface {
 	Health() bool
 	StatusData() (StatusData, bool)
+	Dashboard() (DashboardData, bool)
 }
 
 // Subscriptions supplies torrent state for v1.1 subscriptions
@@ -543,6 +545,10 @@ func (s *Server) handle(conn net.Conn) {
 		case "system.status":
 			data, ok := s.handler.StatusData()
 			c.send(EncodeStatus(req.ID, ok, data))
+		case "dashboard.status":
+			// v1.3 (ADR-0007): aggregates served from committed state.
+			data, ok := s.handler.Dashboard()
+			c.send(EncodeDashboardStatus(req.ID, ok, data))
 		case "torrent.subscribe":
 			if s.subs == nil {
 				c.send(EncodeError(failCode(errUnsupported)))
