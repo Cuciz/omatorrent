@@ -43,25 +43,48 @@ evidence; "code looks right" is never sufficient.
   parent dirs refused, shutdown closes stalled clients +
   identity-checked socket removal, degraded system.status.
   Example frames in `contracts/ipc/v1/` are consumed by tests.
-- **Cache-only state** — `internal/state/manager_test.go`:
-  Snapshot/health never contact the backend (counted via fake; degraded
-  loading state before the first cycle), first Run cycle populates,
-  degraded when backend down, recovery, backoff, cancel.
+- **Incremental state** — `internal/state/syncer_test.go`: full/delta
+  merge, partial-field semantics (absent vs explicit zero), removals,
+  last-known-good on malformed payloads, rebuild-no-ghost, concurrent
+  readers, cancel, state normalization.
 - **Integration (live backend)** — Phase 0 evidence gathered manually +
   scripted: live probes (`/api/v2/app/version`, `webapiVersion`,
   `transfer/info`, `sync/maindata` deltas — read-only), daemon ↔ real
-  qbittorrent-nox via `ot-probe` (systemd-run), no mutations.
+  qbittorrent-nox via `ot-probe` (systemd-run). Mutation semantics were
+  live-verified in Phase 0.3 ONLY through a disposable random-infohash
+  magnet (never resolvable, no data, removed with both deleteFiles
+  variants) plus no-op unknown-hash calls; the user's real torrents are
+  never mutated (count verified 3 → 3 around every run).
 - **IPC v1.1 subscriptions** — snapshot frame sequence (name-sorted,
   count/index/id), delta push, delta chunking (bounded frames, shared
   seq), invalid subscribe schema, reconnect/resubscribe with fresh
   snapshot, name cap, slow-subscriber disconnect, v1.0 requests still
   served on a subscribed connection.
+- **Mutations — adapter** (`internal/qbittorrent/client_mutations_test.go`):
+  stop/start/pause/resume paths and form shapes, delete with EXPLICIT
+  deleteFiles false/true, add with structured echo and legacy body,
+  409 → ErrConflict, unexpected status, unreachable, 403-relogin retry.
+- **Mutations — orchestration** (`internal/mutate/mutator_test.go`):
+  stale/invalid/duplicate/unavailable validation without backend calls,
+  version gating (≥ 2.11.0 stop/start, legacy pause/resume, garbage
+  version), reconciliation confirmed/timeout/degraded-never-confirms,
+  replay after completion never re-executes (incl. remove-with-files),
+  in-flight replay same mutation id, ref_conflict, busy cap, echo
+  mismatch rejection, ring bounds.
+- **Mutations — IPC contract** (`internal/ipc/server_mutations_test.go`):
+  exact accepted/rejected frames, delete_files boolean enforcement
+  matrix (missing/string/number/null ⇒ invalid_message + close), schema
+  matrix (hash/ref/url/key sets), replay result carries request id,
+  result push reaches only mutating connections, disabled server,
+  anti-drift example files.
 - **Shell checks** — `omarchy plugin validate` (manifest schema),
   `tools/test_quickshell.sh` (isolated `qs` instance speaking IPC v1 to
   the daemon with the widget's one-in-flight/id-matching discipline,
-  including mismatched-id rejection), live bar observations +
-  screenshots (visual-runtime standard), degraded states observed
-  (daemon stop/start), journal error-free.
+  including mismatched-id rejection; Phase 0.3: the full v1.2 mutation
+  lifecycle against the disposable torrent — add/duplicate/replay/
+  invalid/pause/resume/remove both variants/stale), live bar + panel
+  observations + screenshots (visual-runtime standard), degraded states
+  observed (daemon stop/start), journal error-free.
 
 ## done_when examples (the standard)
 

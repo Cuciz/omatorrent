@@ -86,12 +86,20 @@ mutable state.
   `cmd/omatorrent-service` (wiring, signals, slog/JSON),
   `cmd/ot-probe` (debug IPC client), `internal/ipc` (socket lifecycle +
   strict protocol), `internal/qbittorrent` (only qBittorrent-aware
-  component; auth/ban classes, SID re-login), `internal/state`
+  component; auth/ban classes, SID re-login; mutation endpoints with
+  version-gated stop/start vs legacy pause/resume), `internal/state`
   (background refresh, backoff 2 s→30 s, snapshot cache),
-  `internal/config` (0600-enforced JSON config, defaults).
-- IPC v1 per ADR-0004 (NDJSON, hello/health/system.status, no
-  mutations). Plugin `plugins/local.omatorrent/` is presentation only
-  (Quickshell.Io Socket + SplitParser, 2 s poll, bounded reconnect).
+  `internal/mutate` (Phase 0.3 mutation orchestration per ADR-0006:
+  validation against committed state, bounded submission, ref replay
+  ring, state-derived confirmation), `internal/config` (0600-enforced
+  JSON config, defaults).
+- IPC v1 per ADR-0004 + v1.1 read-only state (ADR-0005) + v1.2 staged
+  mutations (ADR-0006: torrent.pause/resume/add/remove →
+  mutation.accepted/rejected → state-derived mutation.result
+  confirmed|timeout; accepted ≠ confirmed). Plugin
+  `plugins/local.omatorrent/` is presentation only (Quickshell.Io
+  Socket + SplitParser, 2 s poll, bounded reconnect; intents,
+  confirmations and result rendering — no qBittorrent vocabulary).
 - systemd user unit in `packaging/systemd/`; example frames in
   `contracts/ipc/v1/`.
 

@@ -10,7 +10,7 @@ Dependencies and exit criteria use the evidence rules from
 |---|---|---|---|
 | 0.1 | Foundations: repo, Go module, daemon skeleton, IPC contract v1, qBittorrent capability probe, bar widget | Phase 0 | handshake + version-reject contract tests pass; live probe against qbittorrent-nox returns version+WebAPI version; bar shows real state or explicit disconnected state |
 | 0.2 | Panel + incremental state sync (`sync/maindata` + rid) | 0.1 | maindata incremental updates verified against fixtures; panel lists real torrents; reconnect after daemon restart works |
-| 0.3 | Essential torrent actions (pause/resume/add/remove without files) | 0.2 | mutation contract tests; confirmation flow for removal; degraded states truthful |
+| 0.3 | Essential torrent actions (pause/resume/add/remove, explicit delete-files, staged confirmation) | 0.2 | mutation contract tests; confirmation flow for removal; degraded states truthful |
 | 0.4 | Dashboard | 0.2 | dashboard renders health/stats from real daemon data; lifecycle open/close stable |
 | 0.5 | Remote qBittorrent + security hardening | 0.3 | TLS + credential handling security-reviewed; remote backend integration test |
 | 0.6 | VPN monitoring (defense in depth) | 0.5 | VPN status claims provable; security review of the safety model |
