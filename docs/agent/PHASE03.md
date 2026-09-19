@@ -75,9 +75,69 @@ qBittorrent WebAPI 2.15.1 (live-verified semantics, docs/QBITTORRENT.md)
   internal/mutate (matches() now compares URL for add), regression test
   added (TestReplayAddMatchesOnURL).
 
-## Review verdicts
+## Review verdicts (all three ran after implementation, implementer excluded)
 
-(pending — to be recorded after architecture/security/QA reviews)
+- **Architecture: APPROVE-WITH-NOTES.** All seven invariants verified with
+  evidence (QML purity via vocabulary audit; import graph via go list —
+  internal/ipc has zero internal deps; confirmation exclusively from
+  committed state; no optimistic-authoritative QML; purely additive IPC;
+  no Transmission coupling / no speculative abstraction; ADR-0006
+  implemented clause by clause). 4 MINOR findings + 4 notes, all addressed
+  in the fix round below.
+- **Security: PASS-WITH-FINDINGS.** All 11 mandated focus items
+  CONFIRMED-SAFE with file:line evidence (destructive boolean chain
+  end-to-end, replay ring, concurrent same-ref, malformed inputs, payload
+  bounds, no shell execution, no paths, no secret surfaces, log content,
+  DoS bounds, retry behavior, anti-reflection); no BLOCKER/MAJOR. 3 MINOR
+  + 4 INFO findings, addressed below.
+- **QA: READY-FOR-REVIEW.** Every gate independently reproduced with
+  `-count=1` (no cached evidence): gofmt/vet/build, full race suite (109
+  PASS), targeted mutation tests 6/6, harness 82/82, guard 39/39, plugin
+  validate, full live smoke 10/10 stages with disposable torrent and
+  real-count 3 → 3, daemon active on 0.3.0-phase03, 30-min journal clean.
+  Zero defects, zero flakes, no material discrepancies vs this record.
+
+## Review fix round (2026-09-19, applied and re-validated)
+
+- [arch-1 / sec-F1] Strict key sets restored for pre-v1.2 types:
+  hash/url/delete_files/ref on hello/health/system.status/
+  torrent.subscribe ⇒ invalid_message (TestPreV12TypesRejectMutationFields).
+- [sec-F2] Registration race closed structurally: ref lookup (in-flight
+  AND completed ring) now happens in the same critical section as
+  registration (lookupRefLocked), so a ref that completed while another
+  Submit validated can never re-register and re-execute.
+- [arch-note6 / sec-F3] Result pump re-arms: a dropped source
+  resubscribes after a bounded pause (logged) instead of silently dying
+  for the process lifetime.
+- [arch-2] Replayed-result wire shape (mutation.result WITH id)
+  documented in docs/IPC.md + ADR-0006 amendment; contract example
+  mutation-result-replay.txt + anti-drift test.
+- [arch-3] Version-gating comment/docs corrected: empty (unprobed)
+  version → modern endpoints; present-but-unparseable → legacy; both
+  wrong guesses fail visibly (docs/QBITTORRENT.md adapter rule 5).
+- [arch-4] Panel pending overlay now clears on EVERY stage-1 rejection
+  (previously stuck on backend_unavailable/backend_rejected/busy/
+  ref_conflict); addMagnet() guards on the same presentation-safe
+  validation as the button (a schema-invalid frame would close the
+  connection).
+- [sec-F5] Advisory early busy-cap check before the O(N) state clone
+  (spam no longer amplifies memory bandwidth).
+- [sec-F6] http.Client refuses redirects (ErrUseLastResponse): a 302 can
+  no longer silently convert a mutating POST to a GET.
+- [arch-note7] Cross-reference comment on the duplicated 40/64-hex regex.
+- [arch-note8] Stale manager_test.go reference in docs/TESTING.md fixed.
+- [sec-F4 / arch-note5] Documented residuals in ADR-0006: converged
+  in-flight replay gets no terminal frame if the original fails stage 1;
+  theoretical result-before-accepted enqueue ordering (clients treat
+  pushes and responses as independent id-keyed streams).
+- [sec-F7] Documented as-is: >2048-byte magnet is a schema violation
+  (invalid_message, connection closes) — the panel pre-validates so it
+  is unreachable from the shipped UI.
+
+Re-validation after the fix round: gofmt/vet clean; `go test -race
+-count=1 ./...` PASS; daemon redeployed (restart, active); live smoke
+re-run 10/10 PASS with real count 3 → 3; shell restarted with the fixed
+panel — journal clean, panel re-verified visually.
 
 ## Known limitations
 

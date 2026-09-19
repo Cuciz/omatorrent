@@ -127,7 +127,8 @@ Panel {
 
   function addMagnet() {
     const url = addText.trim()
-    // Presentation-safe basics only; the daemon is the authority.
+    // Presentation-safe basics only; the daemon is the authority. The
+    // guard matters: a schema-invalid frame would close the connection.
     if (!url.startsWith("magnet:") || url.length > 2048) return
     if (!requestMutation("torrent.add", { url: url })) return
     addOpen = false
@@ -179,7 +180,10 @@ Panel {
     }
     mutError = messages[code] || "Action failed"
     mutErrorSince = Date.now()
-    if (code === "stale_torrent") {
+    // A stage-1 rejection is terminal for this attempt: the daemon will
+    // not perform it, so the pending overlay must go (review finding —
+    // it previously stuck on non-stale codes).
+    if (typeof hash === "string" && hash !== "" && pendingMutations[hash] !== undefined) {
       delete pendingMutations[hash]
       pendingMutationsChanged()
     }

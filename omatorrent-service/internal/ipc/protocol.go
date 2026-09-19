@@ -559,14 +559,17 @@ func parseFrame(frame []byte) (Request, error) {
 		return Request{}, errInvalid // trailing JSON
 	}
 
-	// Per-type exact key sets.
+	// Per-type exact key sets. Pre-v1.2 types must reject the v1.2 fields
+	// too — a smuggled hash/url/delete_files/ref on health/status/
+	// subscribe is invalid_message exactly as any other unknown field
+	// was before v1.2 existed (review finding: grammar strictness).
 	switch req.Type {
 	case "hello":
-		if !hasProtocol || hasID {
+		if !hasProtocol || hasID || hasHash || hasURL || hasDelete || hasRef {
 			return Request{}, errInvalid
 		}
 	case "health", "system.status", "torrent.subscribe":
-		if !hasID || hasProtocol {
+		if !hasID || hasProtocol || hasHash || hasURL || hasDelete || hasRef {
 			return Request{}, errInvalid
 		}
 	case "torrent.pause", "torrent.resume":

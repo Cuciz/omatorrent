@@ -396,24 +396,39 @@ func (s *Server) Serve() error {
 // pumpResults forwards terminal mutation results to every connection
 // that has issued at least one mutation request (ADR-0006: pure status
 // clients never receive them). Slow consumers are disconnected by the
-// ordinary connIO queue rule.
+// ordinary connIO queue rule. The subscription RE-ARMS if the source
+// drops it (review finding: a single transient close would otherwise
+// silence result pushes daemon-wide until restart); it stops for good
+// only on server shutdown.
 func (s *Server) pumpResults(stop <-chan struct{}) {
-	ch, cancel := s.muts.Results()
-	defer cancel()
 	for {
+		ch, cancel := s.muts.Results()
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for r := range ch {
+				frame := EncodeMutationResult(r)
+				s.mu.Lock()
+				for c := range s.mutConns {
+					c.send(frame)
+				}
+				s.mu.Unlock()
+			}
+		}()
 		select {
 		case <-stop:
+			cancel()
 			return
-		case r, ok := <-ch:
-			if !ok {
+		case <-drained:
+			// Source dropped us (e.g. a slow-forwarder overflow upstream):
+			// log and resubscribe after a bounded pause.
+			s.log.Warn("mutation result source dropped; resubscribing")
+			cancel()
+			select {
+			case <-stop:
 				return
+			case <-time.After(time.Second):
 			}
-			frame := EncodeMutationResult(r)
-			s.mu.Lock()
-			for c := range s.mutConns {
-				c.send(frame)
-			}
-			s.mu.Unlock()
 		}
 	}
 }

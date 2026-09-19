@@ -27,8 +27,8 @@ evidence; "code looks right" is never sufficient.
   - `internal/qbittorrent/client_test.go` — adapter against httptest
     fixtures (login success/bad-credentials/banned, bypass mode, SID
     expiry re-login, unauthorized, decode errors, unreachable).
-  - `internal/state/manager_test.go` — snapshot cache, degraded states,
-    recovery after failure, error classification, cancel.
+  - `internal/state/syncer_test.go` — full/delta merge cycles, degraded
+    states, recovery after failure, error classification, cancel.
   - `internal/config/config_test.go` — defaults, file load, permissive
     file refusal, explicit-missing error, env override.
 - **Contract tests (IPC)** — `internal/ipc/server_test.go` against real

@@ -292,4 +292,30 @@ func TestContractExamplesV12(t *testing.T) {
 	if got := read("mutation-result.txt"); got != string(EncodeMutationResult(MutationResult{Mutation: 12, Action: "torrent.pause", Hash: mutHash, Status: "confirmed"})) {
 		t.Fatalf("result example drifted: %s", got)
 	}
+	if got := read("mutation-result-replay.txt"); got != string(EncodeMutationResultWithID(8, MutationResult{Mutation: 12, Action: "torrent.pause", Hash: mutHash, Status: "confirmed"})) {
+		t.Fatalf("replay result example drifted: %s", got)
+	}
+}
+
+// Pre-v1.2 request types must reject the v1.2 fields: exact key sets are
+// part of the grammar (review finding — smuggled fields were parsed and
+// silently ignored after v1.2 introduced them).
+func TestPreV12TypesRejectMutationFields(t *testing.T) {
+	_, path := startMutServer(t, &fakeHandler{health: true}, newFakeMuts())
+	bad := []string{
+		`{"type":"health","id":1,"ref":"x"}`,
+		`{"type":"health","id":1,"hash":"` + mutHash + `"}`,
+		`{"type":"system.status","id":1,"delete_files":true}`,
+		`{"type":"system.status","id":1,"url":"magnet:?xt=urn:btih:` + mutHash + `"}`,
+		`{"type":"torrent.subscribe","id":1,"ref":"x"}`,
+		`{"type":"hello","protocol":1,"ref":"x"}`,
+	}
+	for _, frame := range bad {
+		c := dial(t, path)
+		c.handshake()
+		c.send(frame)
+		if got := c.recv(); got != `{"type":"error","protocol":1,"code":"invalid_message"}` {
+			t.Fatalf("frame %s: got %s, want invalid_message", frame, got)
+		}
+	}
 }

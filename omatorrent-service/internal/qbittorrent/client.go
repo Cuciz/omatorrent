@@ -87,8 +87,19 @@ func New(baseURL, username, password string) (*Client, error) {
 		return nil, fmt.Errorf("qbittorrent: cookie jar: %w", err)
 	}
 	return &Client{
-		base:     u,
-		hc:       &http.Client{Timeout: 5 * time.Second, Jar: jar},
+		base: u,
+		// Redirects are refused (returned as-is and classified as
+		// unexpected responses): a mutating POST silently converted to a
+		// GET by a 302 would be reported accepted and never happen
+		// (review finding). qBittorrent's API never legitimately
+		// redirects.
+		hc: &http.Client{
+			Timeout: 5 * time.Second,
+			Jar:     jar,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		username: username,
 		password: password,
 	}, nil

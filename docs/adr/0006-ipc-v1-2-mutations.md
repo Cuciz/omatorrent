@@ -96,7 +96,11 @@ such; the committed state remains the only authority and the client must
 not auto-retry destructive actions. Result frames are delivered exactly
 once per mutation, on every connection that has issued at least one
 mutation request (pure status clients such as the bar widget never
-receive them), ordered after any prior frames on that connection.
+receive them), ordered after any prior frames on that connection under
+the lockstep discipline. (AMENDMENT, review: a theoretically stalled
+read loop could let a result push be enqueued before its own
+`mutation.accepted` — clients must treat pushes and request responses
+as independent, id-keyed streams, which the reference panel does.)
 
 ### Replay and retry rules (fail-safe, non-durable)
 
@@ -105,9 +109,15 @@ receive them), ordered after any prior frames on that connection.
 - Replayed `ref` still in flight ⇒ `mutation.accepted` with the SAME
   mutation id; no second backend call; the result follows once.
 - Replayed `ref` already completed ⇒ one terminal frame: the recorded
-  `mutation.rejected` code or the recorded `mutation.result` status. No
-  second backend call. A same-hash remove can therefore never execute
-  twice through a retry.
+  `mutation.rejected` code or the recorded `mutation.result` status
+  (delivered as the request RESPONSE, carrying the replaying request's
+  `id` — the only `mutation.result` shape with an `id`). No second
+  backend call. A same-hash remove can therefore never execute twice
+  through a retry. AMENDMENT (review): an in-flight replay that
+  converges on the original's mutation id receives no terminal frame if
+  the ORIGINAL submission then fails stage 1 — the rejection goes only
+  to the requesting connection; replaying clients recover via the state
+  snapshot and their pending watchdog (documented residual).
 - `ref_conflict` is returned when the replay's action/parameters differ
   from the recorded attempt.
 - LIMIT (documented, deliberate): deduplication is per-daemon-process.

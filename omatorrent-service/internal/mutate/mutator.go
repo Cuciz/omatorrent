@@ -201,7 +201,10 @@ func New(backend Backend, src StateSource, opts Options, log *slog.Logger) *Muta
 	}
 }
 
-// magnetHashRe validates the btih payload of a magnet xt parameter.
+// btihRe validates the btih payload of a magnet xt parameter. NOTE:
+// intentionally duplicated in internal/ipc (wire grammar) — the two
+// roles differ (request field validation vs magnet parsing) but the
+// hash shape must stay in sync (review note).
 var btihRe = regexp.MustCompile(`^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$`)
 
 // ParseMagnetHash extracts the (lowercased) infohash from a magnet URI.
@@ -220,6 +223,32 @@ func ParseMagnetHash(u string) (string, bool) {
 	return "", false
 }
 
+// lookupRefLocked resolves a ref against in-flight and completed
+// records. Caller holds m.mu. Returns the converged Stage1 answer when
+// the ref is known (accepted-view of in-flight, recorded rejection, or
+// recorded terminal replay), or ok=false when the ref is new.
+func (m *Mutator) lookupRefLocked(req Request) (Stage1, bool) {
+	if p, ok := m.inflight[req.Ref]; ok {
+		if !p.matches(req) {
+			return Stage1{Outcome: CodeRefConflict}, true
+		}
+		return Stage1{Outcome: OutcomeAccepted, Mutation: p.mutation, Action: p.action, Hash: p.hash}, true
+	}
+	for i := range m.ring {
+		if m.ring[i].ref == req.Ref {
+			r := m.ring[i]
+			if !r.matches(req) {
+				return Stage1{Outcome: CodeRefConflict}, true
+			}
+			if r.outcome != "" {
+				return Stage1{Outcome: r.outcome}, true
+			}
+			return Stage1{Replay: &Result{Mutation: r.mutation, Action: r.action, Hash: r.hash, Status: r.status}}, true
+		}
+	}
+	return Stage1{}, false
+}
+
 // Submit validates and executes one mutation request. It may block up
 // to SubmitTimeout on the backend call; the context is daemon-owned
 // (NOT tied to an IPC connection) so a disconnect cannot abort a
@@ -228,28 +257,19 @@ func (m *Mutator) Submit(req Request) Stage1 {
 	req.Hash = strings.ToLower(req.Hash)
 
 	// Replay handling: an in-flight or completed ref never re-executes.
+	// (Also re-checked atomically at registration below — a ref can move
+	// from in-flight to completed while THIS call is validating against
+	// state; the registration re-check closes that race.)
 	m.mu.Lock()
-	if p, ok := m.inflight[req.Ref]; ok {
-		if !p.matches(req) {
-			m.mu.Unlock()
-			return Stage1{Outcome: CodeRefConflict}
-		}
-		s1 := Stage1{Outcome: OutcomeAccepted, Mutation: p.mutation, Action: p.action, Hash: p.hash}
+	if s1, ok := m.lookupRefLocked(req); ok {
 		m.mu.Unlock()
 		return s1
 	}
-	for i := range m.ring {
-		if m.ring[i].ref == req.Ref {
-			r := m.ring[i]
-			m.mu.Unlock()
-			if !r.matches(req) {
-				return Stage1{Outcome: CodeRefConflict}
-			}
-			if r.outcome != "" {
-				return Stage1{Outcome: r.outcome}
-			}
-			return Stage1{Replay: &Result{Mutation: r.mutation, Action: r.action, Hash: r.hash, Status: r.status}}
-		}
+	// Advisory early cap check: reject obvious spam before the O(N)
+	// state clone (the authoritative check happens at registration).
+	if len(m.inflight) >= m.opts.MaxInFlight {
+		m.mu.Unlock()
+		return Stage1{Outcome: CodeBusy}
 	}
 	m.mu.Unlock()
 
@@ -278,20 +298,16 @@ func (m *Mutator) Submit(req Request) Stage1 {
 		return m.reject(req, 0, CodeBackendUnavailable)
 	}
 
-	// Register in-flight under the lock (concurrent same-ref submissions
-	// converge here), enforcing the daemon-wide cap.
+	// Register in-flight under the lock. The ref lookup happens in the
+	// SAME critical section as the registration, so a ref that completed
+	// (or was rejected) while this call validated can never register and
+	// re-execute (review finding: registration race).
 	hash := req.Hash
 	if req.Action == Add {
 		hash = wantHash
 	}
 	m.mu.Lock()
-	if p, ok := m.inflight[req.Ref]; ok {
-		// Lost a race with an identical submission: return that one.
-		if !p.matches(req) {
-			m.mu.Unlock()
-			return Stage1{Outcome: CodeRefConflict}
-		}
-		s1 := Stage1{Outcome: OutcomeAccepted, Mutation: p.mutation, Action: p.action, Hash: p.hash}
+	if s1, ok := m.lookupRefLocked(req); ok {
 		m.mu.Unlock()
 		return s1
 	}
@@ -333,10 +349,12 @@ func (m *Mutator) Submit(req Request) Stage1 {
 
 // submit performs the backend call, choosing endpoint generations by
 // the probed WebAPI version (docs/QBITTORRENT.md: stop/start on
-// ≥ 2.11.0; pause/resume were REMOVED in qBittorrent 5.x). An unknown
-// version defaults to the modern endpoints: the reference deployments
-// are 5.x and the syncer normally probes the version before mutations
-// are possible (state is non-empty).
+// ≥ 2.11.0; pause/resume were REMOVED in qBittorrent 5.x). Version
+// handling: an EMPTY (unprobed) version defaults to the modern
+// endpoints (reference deployments are 5.x and the syncer normally
+// probes before mutations are possible); a present-but-unparseable
+// version falls back to the LEGACY endpoints — both wrong guesses fail
+// visibly (404 → backend_rejected), never silently.
 func (m *Mutator) submit(ctx context.Context, req Request, webapiVersion string) error {
 	modern := webapiVersion == "" || webapiAtLeast(webapiVersion, 2, 11, 0)
 	switch req.Action {

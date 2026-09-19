@@ -259,7 +259,10 @@ probes, cookie-jar session) and cross-checked with the official wiki.
    deployment is 2.15.1; a formal compat matrix is a later-phase task —
    do not claim broader support than tested.
 5. Mutations (0.3): stop/start when WebAPI ≥ 2.11.0, pause/resume
-   fallback below it; exactly one hash per mutation request, never
+   fallback below it; an EMPTY (unprobed) version defaults to the modern
+   endpoints, a present-but-unparseable version falls back to the legacy
+   ones — either wrong guess fails visibly (404 → `backend_rejected`),
+   never silently; exactly one hash per mutation request, never
    `all`; `deleteFiles` always explicit; mutation success is confirmed
    ONLY through the sync state (HTTP 200 carries no per-torrent truth);
    the daemon pre-validates magnets (scheme, `xt` urn, 40/64-hex btih)

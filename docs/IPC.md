@@ -247,6 +247,14 @@ authority. Results are delivered exactly once per mutation, on every
 connection that has issued at least one mutation request (pure status
 clients such as the bar widget never receive them).
 
+A REPLAYED ref is answered as the request response in one terminal
+frame: the recorded `mutation.rejected` code, or a `mutation.result`
+carrying the replaying request's `id` plus the recorded terminal status
+— a second wire shape for the same type:
+```json
+{"type":"mutation.result","protocol":1,"id":8,"mutation":12,"action":"torrent.pause","hash":"…","status":"confirmed"}
+```
+
 ### Replay and retry rules
 
 - In-flight `ref` replay ⇒ `mutation.accepted` with the SAME mutation id
