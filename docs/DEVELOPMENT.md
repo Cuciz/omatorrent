@@ -9,6 +9,10 @@ commands to run"; update it when tooling changes.
   `quickshell -n -p /usr/share/omarchy/shell` (quickshell 0.3.1-1).
 - qbittorrent-nox 5.2.3-3, WebUI 127.0.0.1:8080, WebAPI **2.15.1**,
   localhost auth bypass on (dev backend; docs/QBITTORRENT.md).
+- gnome-keyring + libsecret (secret-tool) present — a hard `omarchy`
+  package dependency; omatorrent-service stores remote credentials
+  there (ADR-0009). Missing/locked keyring ⇒ the daemon degrades to
+  `secrets_unavailable` (fail closed, no plaintext fallback).
 - Go 1.27.1 via mise, **repo-scoped** (`.mise.toml`) — installed without
   sudo because interactive sudo was unavailable. The recommended permanent
   method remains `sudo pacman -S go` (official `extra/go`). Re-run
@@ -28,6 +32,7 @@ commands to run"; update it when tooling changes.
 | IPC probe (debug CLI) | `go run ./cmd/ot-probe [-count N] [-interval 2s]` | AVAILABLE |
 | Isolated Quickshell↔daemon smoke (v1.0 + v1.1 subscription) | `bash tools/test_quickshell.sh` | AVAILABLE |
 | Benchmarks (10/100/1000 torrents) | `cd omatorrent-service && go test -bench . -benchmem -run XXX ./internal/state/` | AVAILABLE |
+| Remote-path benchmarks (auth cycle HTTP/TLS, connection.test) | `cd omatorrent-service && go test -bench 'AuthCycle\|ConnectionTestPath' -run XXX ./internal/qbittorrent/ ./internal/connection/` | AVAILABLE |
 | Plugin manifest validation | `omarchy plugin validate plugins/local.omatorrent` | AVAILABLE |
 | Install plugin (dev) | copy `plugins/local.omatorrent/` → `~/.config/omarchy/plugins/` then `omarchy plugin enable local.omatorrent` | AVAILABLE |
 | Service control | `systemctl --user {start,stop,restart,status} omatorrent-service` | AVAILABLE |
@@ -35,8 +40,15 @@ commands to run"; update it when tooling changes.
 | Shell restart (purge plugin instances) | `omarchy-restart-shell` | AVAILABLE |
 
 Config: `$XDG_CONFIG_HOME/omatorrent/service.json` (optional; JSON, must
-be 0600; missing file → defaults pointing at the local dev backend).
+be 0600; missing file → defaults pointing at the local dev backend; a
+non-empty `qbittorrent.password` fails load with a migration error —
+credentials live in the Secret Service since 0.5).
+Connection profile: `$XDG_CONFIG_HOME/omatorrent/connection.json`
+(daemon-written via IPC `connection.configure`, 0600, strict schema;
+absent → the service.json endpoint applies).
 Socket: `$XDG_RUNTIME_DIR/omatorrent/service.sock`.
+Daemon flags: `-config`, `-socket`, `-connection` (or
+`$OMATORRENT_CONNECTION`).
 
 ## Known workflow quirks (observed 2026-09-18)
 

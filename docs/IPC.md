@@ -382,10 +382,13 @@ echoed, logged or persisted.
 Response (exact key set):
 ```json
 {"type":"connection.status","protocol":1,"id":10,"configured":true,
- "mode":"local","host":"127.0.0.1:8080","transport":"http","insecure":false,
+ "mode":"local","url":"http://127.0.0.1:8080","host":"127.0.0.1:8080","transport":"http","insecure":false,
  "username":"","has_secret":false,"tls_mode":"system",
- "status":"connected","detail":"","epoch":1}
+ "status":"connected","detail":"","epoch":0}
 ```
+(`pin` — 64 hex — is additionally present iff `tls_mode` is `pin`;
+`epoch` starts at 0 on daemon start and increments on every
+configured switch; `detail` is omitted when empty.)
 - `mode` — `local` (loopback URL) or `remote` (derived, never stored);
   `url` — the validated origin (non-secret; the settings form prefills
   it — like `username`, status surfaces display only `host`).

@@ -53,10 +53,15 @@ accessed by spawning `secret-tool` with the secret crossing **only via
 stdin/stdout pipes** (never argv, never temp files):
 
 - Item attributes: `service=omatorrent`, `kind=qbt-webui-password`;
-  label "OmaTorrent — qBittorrent WebUI password". One secret exists
+  label "OmaTorrent qBittorrent WebUI password" (pure ASCII: GLib
+  converts labels from the locale charset, and the daemon's minimal
+  child environment runs under C locale where non-ASCII aborts the
+  store — live-verified finding, commit 1cfd2cb). One secret exists
   (single-backend product; a second kind would require a new ADR).
-- `internal/secrets.Provider` interface (`Store`, `Get`, `Delete`,
-  `Available`); the `secret-tool` implementation is the only production
+- `internal/secrets.Provider` interface (`Store`, `Get`, `Delete` —
+  unavailability is the `ErrUnavailable` error class, surfaced as the
+  distinct `secrets_unavailable` connection status); the `secret-tool`
+  implementation is the only production
   backend; unit tests use a fake provider. The interface keeps a
   provider swap (KWallet, go-keyring) non-architectural.
 - Each operation spawns the tool with a bounded timeout (5 s), a

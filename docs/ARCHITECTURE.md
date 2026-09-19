@@ -18,12 +18,10 @@ omatorrent-service (Go, ADR-0002)
 ├── IPC server
 ├── state manager
 ├── qBittorrent adapter (only qBittorrent-aware component)
-├── backend abstraction (future non-qBittorrent backends)
-├── VPN monitor (defense in depth)
-├── storage monitor
+├── connection manager (remote profiles, TLS policy, backend epochs)
+├── secret provider (only holder of credentials — ADR-0009)
 ├── metrics/history
-├── SQLite (state/history only — never secrets)
-└── secret provider (only holder of credentials)
+└── SQLite (state/history only — never secrets)
 ```
 
 ## Boundaries [DECISION, ADR-0001]
@@ -87,6 +85,44 @@ mutable state.
   Color.menu/Style tokens; Escape/click-outside close via dismiss()
   (close() is host-invoked only — calling shell.hide from close()
   recurses; first-party close/dismiss split).
+
+## Phase 0.5 as-built (2026-09-19)
+
+- Connection management (ADR-0008): `internal/connection` owns the
+  profile (daemon-written `connection.json`, strict schema, atomic
+  0600 writes), strict URL validation (http/https, no userinfo/query/
+  fragment, reverse-proxy path prefix), the HTTP/HTTPS policy
+  (loopback exempt; non-loopback HTTP requires the persisted
+  acknowledgement) and the fail-closed TLS modes (system roots /
+  explicit CA bundle / certificate pinning — never a disabled
+  verification). One-shot `connection.test` probes use temporary
+  clients (no state change); `connection.configure` validates →
+  applies the explicit secret intent → writes → switches the backend
+  EPOCH: syncer discards stale-epoch commits and publishes the old
+  torrents as removals, the mutator refuses in-flight switches and
+  settles orphaned pendings as ambiguous — a mutation can never
+  retarget across backends. Auth frugality: auth-class failures back
+  off 30 s→10 min and go sticky after 3 consecutive bad-credential
+  logins (below qBittorrent's 5-attempt IP ban).
+- Secrets (ADR-0009): `internal/secrets` talks to the Secret Service
+  via `secret-tool` (secret through stdin/stdout pipes only, ASCII
+  label — GLib charset lesson recorded in PHASE05.md); no plaintext
+  fallback anywhere; `service.json` passwords fail load with a
+  migration error.
+- Adapter: version-adaptive login (5.2: 204/401; ≤ 5.1: Ok./Fails.),
+  no Origin/Referer, refused redirects everywhere, 202-Accepted adds,
+  fetch-per-login passwords (zeroed), logout on switch.
+- IPC v1.4 (additive): `connection.status/test/configure`; password is
+  transit-only and wiped after the handler; responses carry host
+  labels, versions, fingerprints and fixed codes only. v1.0–v1.3
+  shapes byte-compatible.
+- UI: settings is a MODE of the torrent panel (native Omarchy pattern;
+  gear glyph; password field write-only) reachable from the dashboard
+  footer via the host CLI; panel/dashboard show differentiated
+  connection classes (auth_required/auth_failed/banned/tls_*/
+  secrets_unavailable/invalid_configuration), a display-safe remote
+  host label, insecure-HTTP badges, and auth-lost callouts. The bar
+  widget is unchanged.
 
 ## Phase 0.2 as-built (2026-09-18)
 

@@ -45,8 +45,8 @@ live probes where safe):
 One active backend, ever, before 1.0. Daemon-owned store at
 `$XDG_CONFIG_HOME/omatorrent/connection.json`:
 
-- Strict JSON schema (`schema:1`), bounded fields, fail-closed on
-  malformed content; write path: 0700 directory, `O_NOFOLLOW`
+- Strict JSON schema (unknown fields rejected), bounded fields,
+  fail-closed on malformed content; write path: 0700 directory, `O_NOFOLLOW`
   everywhere, temp file created `O_CREAT|O_EXCL` 0600 in the same
   directory, fsync, atomic rename; the target path is fixed — the
   daemon never writes anywhere else, and a symlinked target is
@@ -141,7 +141,8 @@ no redirect is ever followed.
 - Logout: on backend switch the daemon makes one best-effort
   `auth/logout` POST with the old session (no credentials in the
   request, 2 s timeout, result ignored) before discarding the old
-  client and cookie jar.
+  client and cookie jar. (Implemented after the architecture review
+  flagged the gap; pinned by `TestSwitchLogsOutOldSession`.)
 
 ### 7. Error model (daemon status codes)
 
@@ -156,8 +157,9 @@ accompany, never reflecting request payloads.
 
 ### 8. Backend epochs and switch safety
 
-- A monotonic per-process **epoch** (uint64, starts at 1, resets on
-  daemon restart — documented) identifies the active backend
+- A monotonic per-process **epoch** (uint64, starts at 0 on daemon
+  start and increments on every configured switch; resets on daemon
+  restart — documented) identifies the active backend
   identity. Every sync cycle captures the epoch at start; a commit
   whose epoch is stale is discarded (a cycle racing the switch can
   never publish old-backend state).
@@ -209,6 +211,14 @@ list extended.
   with a fixed code (`invalid_url`, `insecure_http`,
   `secrets_unavailable`, `mutations_pending`, `pin_unknown`,
   `storage_error`).
+
+  Post-review amendments (implemented): the previous secret is
+  snapshotted before the secret op and restored if anything later in
+  the activation fails (no half-applied credential state — security
+  review finding 2), and credential-bearing `connection.test` logins
+  are paced (one per 5 s window; excess refused without backend
+  contact) so a retry loop cannot walk into qBittorrent's IP ban
+  (security review finding 4).
 
 Compatibility: no existing message shape gains a field; clients that
 never send `connection.*` see no difference. The protocol stays
