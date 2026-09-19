@@ -1,9 +1,10 @@
-# OmaTorrent Dashboard (local.omatorrent-dashboard)
+# Sprout Dashboard (local.omatorrent-dashboard)
 
 Companion overlay plugin for [local.omatorrent](../local.omatorrent/):
-a large, native Omarchy dashboard card showing CURRENT state only —
-live transfer speeds, torrent population counts, aggregate data, and
-the transferring-now list — from the omatorrent-service daemon
+the Sprout administration dashboard — a large, native Omarchy overlay
+card showing CURRENT state only — live transfer speeds, torrent
+population counts, aggregate data, and the transferring-now list —
+from the omatorrent-service daemon
 (IPC v1.3 `dashboard.status`, ADR-0007).
 
 - No history, no persisted metrics (Phase 0.8 scope), no torrent-list

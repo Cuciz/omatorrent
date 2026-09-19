@@ -6,7 +6,8 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
-// OmaTorrent dashboard overlay (Phase 0.4, ADR-0007): a large native
+// Sprout dashboard overlay (OmaTorrent internals; Phase 0.5.1 brand,
+// docs/BRAND.md; Phase 0.4, ADR-0007): a large native
 // Omarchy overlay card rendering CURRENT daemon state only. All numbers
 // come from the daemon's v1.3 dashboard.status aggregates over the same
 // IPC discipline as the bar widget/panel (one request in flight,
@@ -354,33 +355,56 @@ Item {
             width: flick.width
             spacing: Style.space(12)
 
-            // ---- Header: title, live state, versions.
+            // ---- Header (Phase 0.5.1): sprout identity + tagline,
+            //      live state/versions/host. Brand is glyph + title +
+            //      tagline only; state keeps theme semantics.
             Item {
               width: parent.width
-              implicitHeight: Math.max(titleText.implicitHeight, stateText.implicitHeight, versionTextItem.implicitHeight) + Style.space(1)
+              implicitHeight: Math.max(titleRow.implicitHeight, stateText.implicitHeight, versionTextItem.implicitHeight) + taglineText.implicitHeight + Style.space(2)
 
               Rectangle {
                 width: Style.space(3)
                 height: Style.space(3)
                 radius: width / 2
-                anchors.left: parent.left
-                anchors.verticalCenter: titleText.verticalCenter
+                anchors.right: parent.right
+                anchors.top: parent.top
                 color: root.live ? Color.accent : root.urgent
               }
+              Row {
+                id: titleRow
+                spacing: Style.space(3)
+
+                SproutGlyph {
+                  variant: "compact"
+                  height: Style.font.title
+                  anchors.verticalCenter: parent.verticalCenter
+                  glyphColor: root.foreground
+                  opacity: 0.85
+                }
+                Text {
+                  id: titleText
+                  text: "Sprout"
+                  anchors.verticalCenter: parent.verticalCenter
+                  color: root.foreground
+                  font.pixelSize: Style.font.title
+                  font.family: Style.font.family
+                }
+              }
               Text {
-                id: titleText
-                text: "OmaTorrent"
+                id: taglineText
+                text: "Torrent client for Omarchy"
                 anchors.left: parent.left
-                anchors.leftMargin: Style.space(5)
-                anchors.top: parent.top
-                color: root.foreground
-                font.pixelSize: Style.font.title
+                anchors.top: titleRow.bottom
+                anchors.topMargin: Style.space(1)
+                color: root.dim
+                font.pixelSize: Style.font.caption
                 font.family: Style.font.family
               }
               Text {
                 id: stateText
                 text: root.headerState
                 anchors.right: parent.right
+                anchors.rightMargin: Style.space(5)
                 anchors.top: parent.top
                 color: root.live ? root.foreground : root.urgent
                 opacity: 0.75
@@ -392,7 +416,6 @@ Item {
                 text: root.versionText
                 anchors.right: parent.right
                 anchors.top: stateText.bottom
-                anchors.topMargin: Style.space(1)
                 color: root.dim
                 font.pixelSize: Style.font.caption
                 font.family: Style.font.family
@@ -400,9 +423,8 @@ Item {
               Text {
                 visible: root.connHostLabel !== ""
                 text: root.connHostLabel
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(5)
-                anchors.top: titleText.bottom
+                anchors.right: parent.right
+                anchors.top: versionTextItem.bottom
                 color: root.dim
                 font.pixelSize: Style.font.caption
                 font.family: Style.font.family

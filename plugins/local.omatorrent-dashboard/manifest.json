@@ -1,10 +1,14 @@
 {
   "schemaVersion": 1,
   "id": "local.omatorrent-dashboard",
-  "name": "OmaTorrent Dashboard",
-  "version": "0.5.0",
+  "name": "Sprout Dashboard",
+  "version": "0.5.1",
   "author": "Cuciz",
-  "description": "OmaTorrent current-state dashboard overlay (companion to local.omatorrent).",
-  "kinds": ["overlay"],
-  "entryPoints": { "overlay": "Dashboard.qml" }
+  "description": "Sprout current-state dashboard overlay (companion to local.omatorrent).",
+  "kinds": [
+    "overlay"
+  ],
+  "entryPoints": {
+    "overlay": "Dashboard.qml"
+  }
 }
