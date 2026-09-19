@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -36,9 +38,13 @@ const ServiceName = "omatorrent-service"
 
 // Request is a parsed client frame.
 type Request struct {
-	Type     string
-	Protocol int64
-	ID       int64
+	Type        string
+	Protocol    int64
+	ID          int64
+	Hash        string
+	URL         string
+	DeleteFiles bool
+	Ref         string
 }
 
 // Response frames. Field order matches docs/IPC.md (encoding/json emits
@@ -138,6 +144,104 @@ type deltaResponse struct {
 	Seq      uint64        `json:"seq"`
 	Changed  []TorrentItem `json:"changed"`
 	Removed  []string      `json:"removed"`
+}
+
+// ---- v1.2 staged mutations (ADR-0006) ----
+
+type mutationAcceptedResponse struct {
+	Type     string `json:"type"`
+	Protocol int64  `json:"protocol"`
+	ID       int64  `json:"id"`
+	Mutation uint64 `json:"mutation"`
+	Action   string `json:"action"`
+	Hash     string `json:"hash"`
+}
+
+type mutationRejectedResponse struct {
+	Type     string `json:"type"`
+	Protocol int64  `json:"protocol"`
+	ID       int64  `json:"id"`
+	Code     string `json:"code"`
+}
+
+type mutationResultResponse struct {
+	Type     string `json:"type"`
+	Protocol int64  `json:"protocol"`
+	Mutation uint64 `json:"mutation"`
+	Action   string `json:"action"`
+	Hash     string `json:"hash"`
+	Status   string `json:"status"`
+}
+
+// mutationResultIDResponse is the replay shape: a completed ref
+// replayed on a NEW request answers with the recorded terminal result,
+// correlated to that request's id.
+type mutationResultIDResponse struct {
+	Type     string `json:"type"`
+	Protocol int64  `json:"protocol"`
+	ID       int64  `json:"id"`
+	Mutation uint64 `json:"mutation"`
+	Action   string `json:"action"`
+	Hash     string `json:"hash"`
+	Status   string `json:"status"`
+}
+
+// MutationRequest is one mutation intent from a client (already
+// schema-validated by parseFrame).
+type MutationRequest struct {
+	Action      string
+	Hash        string
+	URL         string
+	DeleteFiles bool
+	Ref         string
+}
+
+// MutationResult is a terminal, state-derived mutation outcome.
+type MutationResult struct {
+	Mutation uint64
+	Action   string
+	Hash     string
+	Status   string
+}
+
+// MutationStage1 is the synchronous answer to a mutation request:
+// Outcome "accepted" or a rejection code (docs/IPC.md v1.2); Replay is
+// non-nil when a completed ref was replayed — the recorded terminal
+// result answers the request directly (with the current request id).
+type MutationStage1 struct {
+	Outcome  string
+	Mutation uint64
+	Action   string
+	Hash     string
+	Replay   *MutationResult
+}
+
+// Mutations supplies the v1.2 mutation surface. Submit may block up to
+// a bounded backend-submission timeout; Results broadcasts terminal
+// outcomes. Both must be safe for concurrent use.
+type Mutations interface {
+	Submit(r MutationRequest) MutationStage1
+	Results() (<-chan MutationResult, func())
+}
+
+func EncodeMutationAccepted(id int64, mutation uint64, action, hash string) []byte {
+	return mustMarshal(mutationAcceptedResponse{"mutation.accepted", ProtocolVersion, id, mutation, action, hash})
+}
+
+func EncodeMutationRejected(id int64, code string) []byte {
+	return mustMarshal(mutationRejectedResponse{"mutation.rejected", ProtocolVersion, id, code})
+}
+
+// EncodeMutationResult encodes a pushed terminal result (no id: not a
+// request response).
+func EncodeMutationResult(r MutationResult) []byte {
+	return mustMarshal(mutationResultResponse{"mutation.result", ProtocolVersion, r.Mutation, r.Action, r.Hash, r.Status})
+}
+
+// EncodeMutationResultWithID encodes a replayed terminal result as the
+// response to the replaying request (carries that request's id).
+func EncodeMutationResultWithID(id int64, r MutationResult) []byte {
+	return mustMarshal(mutationResultIDResponse{"mutation.result", ProtocolVersion, id, r.Mutation, r.Action, r.Hash, r.Status})
 }
 
 // DeltaEvent is one committed change from the state source.
@@ -296,6 +400,17 @@ func mustMarshal(v any) []byte {
 
 var errInvalid = sentinelErr{CodeInvalidMessage}
 
+// hashRe and refRe validate v1.2 mutation fields at parse time
+// (docs/IPC.md). The hash contract matches the state layer's
+// normalization (40/64 hex, BitTorrent v1/v2 infohash).
+var (
+	hashRe = regexp.MustCompile(`^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$`)
+	refRe  = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+)
+
+func validHash(h string) bool { return hashRe.MatchString(h) }
+func validRef(r string) bool  { return refRe.MatchString(r) }
+
 // Classified sentinels used across the package; failCode maps any error
 // to its wire code.
 var (
@@ -341,6 +456,8 @@ func parseFrame(frame []byte) (Request, error) {
 		req                  Request
 		hasType, hasProtocol bool
 		hasID                bool
+		hasHash, hasURL      bool
+		hasDelete, hasRef    bool
 	)
 	seen := map[string]bool{}
 	for dec.More() {
@@ -365,13 +482,21 @@ func parseFrame(frame []byte) (Request, error) {
 			return Request{}, errInvalid
 		}
 
-		switch key {
-		case "type":
+		decodeStr := func() (string, bool) {
 			if len(raw) == 0 || raw[0] != '"' {
-				return Request{}, errInvalid
+				return "", false
 			}
 			var s string
 			if json.Unmarshal(raw, &s) != nil {
+				return "", false
+			}
+			return s, true
+		}
+
+		switch key {
+		case "type":
+			s, ok := decodeStr()
+			if !ok {
 				return Request{}, errInvalid
 			}
 			req.Type, hasType = s, true
@@ -392,6 +517,32 @@ func parseFrame(frame []byte) (Request, error) {
 			} else {
 				req.ID, hasID = i, true
 			}
+		case "hash":
+			s, ok := decodeStr()
+			if !ok || !validHash(s) {
+				return Request{}, errInvalid
+			}
+			req.Hash, hasHash = s, true
+		case "url":
+			s, ok := decodeStr()
+			if !ok || len(s) == 0 || len(s) > 2048 || !strings.HasPrefix(s, "magnet:") {
+				return Request{}, errInvalid
+			}
+			req.URL, hasURL = s, true
+		case "delete_files":
+			// REQUIRED JSON boolean literal on torrent.remove; anything
+			// else (string "true", 1/0, null) is a protocol violation —
+			// destructive ambiguity must never pass (ADR-0006).
+			if !bytes.Equal(raw, []byte("true")) && !bytes.Equal(raw, []byte("false")) {
+				return Request{}, errInvalid
+			}
+			req.DeleteFiles, hasDelete = string(raw) == "true", true
+		case "ref":
+			s, ok := decodeStr()
+			if !ok || !validRef(s) {
+				return Request{}, errInvalid
+			}
+			req.Ref, hasRef = s, true
 		default:
 			return Request{}, errInvalid // unknown field
 		}
@@ -418,8 +569,20 @@ func parseFrame(frame []byte) (Request, error) {
 		if !hasID || hasProtocol {
 			return Request{}, errInvalid
 		}
+	case "torrent.pause", "torrent.resume":
+		if !hasID || hasProtocol || !hasHash || !hasRef || hasURL || hasDelete {
+			return Request{}, errInvalid
+		}
+	case "torrent.add":
+		if !hasID || hasProtocol || !hasURL || !hasRef || hasHash || hasDelete {
+			return Request{}, errInvalid
+		}
+	case "torrent.remove":
+		if !hasID || hasProtocol || !hasHash || !hasRef || !hasDelete || hasURL {
+			return Request{}, errInvalid
+		}
 	default:
-		if hasProtocol || hasID {
+		if hasProtocol || hasID || hasHash || hasURL || hasDelete || hasRef {
 			return Request{}, errInvalid // unknown types are type-only
 		}
 	}

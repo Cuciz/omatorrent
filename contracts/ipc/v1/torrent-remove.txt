@@ -1,0 +1,1 @@
+{"type":"torrent.remove","id":6,"hash":"0123456789abcdef0123456789abcdef01234567","delete_files":false,"ref":"panel-3"}

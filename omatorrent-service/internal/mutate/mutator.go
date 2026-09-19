@@ -1,0 +1,529 @@
+// Package mutate owns torrent mutation orchestration (Phase 0.3,
+// ADR-0006): validation against the daemon's committed state, backend
+// submission, ref-based replay handling, and state-derived confirmation.
+// Together with internal/qbittorrent it is the only qBittorrent-aware
+// code in the daemon; the IPC layer sees intent, accepted/rejected and
+// results only. qBittorrent mutation endpoints answer 200-empty in all
+// scenarios (docs/QBITTORRENT.md) — confirmation comes EXCLUSIVELY from
+// the committed sync state, never from the HTTP response.
+package mutate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Cuciz/omatorrent/omatorrent-service/internal/qbittorrent"
+	"github.com/Cuciz/omatorrent/omatorrent-service/internal/state"
+)
+
+// Action is the normalized mutation vocabulary crossing the IPC (the
+// qBittorrent stop/start-vs-pause/resume distinction never leaves the
+// daemon).
+type Action string
+
+const (
+	Pause  Action = "torrent.pause"
+	Resume Action = "torrent.resume"
+	Add    Action = "torrent.add"
+	Remove Action = "torrent.remove"
+)
+
+// Rejection codes (ADR-0006 wire codes).
+const (
+	CodeStaleTorrent       = "stale_torrent"
+	CodeInvalidURL         = "invalid_url"
+	CodeDuplicate          = "duplicate"
+	CodeBackendRejected    = "backend_rejected"
+	CodeBackendUnavailable = "backend_unavailable"
+	CodeBusy               = "busy"
+	CodeRefConflict        = "ref_conflict"
+)
+
+// OutcomeAccepted is the Stage1 outcome for accepted submissions.
+const OutcomeAccepted = "accepted"
+
+// Terminal result statuses.
+const (
+	StatusConfirmed = "confirmed"
+	StatusTimeout   = "timeout"
+)
+
+// Request is one validated IPC mutation request.
+type Request struct {
+	Action      Action
+	Hash        string
+	URL         string
+	DeleteFiles bool
+	Ref         string
+}
+
+// Stage1 is the synchronous answer to a mutation request. Outcome is
+// OutcomeAccepted or a rejection code; Replay is non-nil when a
+// completed ref was replayed — the recorded terminal result is the
+// answer and no backend call happens.
+type Stage1 struct {
+	Outcome  string
+	Mutation uint64
+	Action   Action
+	Hash     string
+	Replay   *Result
+}
+
+// Result is the terminal, state-derived outcome of one mutation.
+type Result struct {
+	Mutation uint64
+	Action   Action
+	Hash     string
+	Status   string // confirmed | timeout
+}
+
+// Backend is the mutation surface of the qBittorrent adapter.
+type Backend interface {
+	StopTorrent(ctx context.Context, hash string) error
+	StartTorrent(ctx context.Context, hash string) error
+	PauseTorrent(ctx context.Context, hash string) error
+	ResumeTorrent(ctx context.Context, hash string) error
+	AddMagnet(ctx context.Context, magnet string) ([]string, error)
+	DeleteTorrent(ctx context.Context, hash string, deleteFiles bool) error
+}
+
+// StateSource supplies committed state and change events (state.Syncer).
+type StateSource interface {
+	State() state.State
+	Health() bool
+	Subscribe() (state.State, <-chan state.Change, func())
+}
+
+// Options tunes the mutator. Zero values get Phase 0.3 defaults.
+type Options struct {
+	SubmitTimeout   time.Duration // per backend submission (default 5s)
+	ReconcileWindow time.Duration // state-confirmation window (default 10s)
+	MaxInFlight     int           // daemon-wide concurrent submissions (default 4)
+	RingSize        int           // completed refs kept for replay (default 64)
+}
+
+func (o *Options) fill() {
+	if o.SubmitTimeout == 0 {
+		o.SubmitTimeout = 5 * time.Second
+	}
+	if o.ReconcileWindow == 0 {
+		o.ReconcileWindow = 10 * time.Second
+	}
+	if o.MaxInFlight == 0 {
+		o.MaxInFlight = 4
+	}
+	if o.RingSize == 0 {
+		o.RingSize = 64
+	}
+}
+
+// Mutator orchestrates mutations. Submit is synchronous (bounded by
+// SubmitTimeout); Run drives reconciliation and result publication.
+type Mutator struct {
+	backend Backend
+	src     StateSource
+	log     *slog.Logger
+	opts    Options
+
+	mu       sync.Mutex
+	nextMut  uint64
+	inflight map[string]*pending
+	ring     []refRecord // bounded, oldest overwritten
+	subs     map[chan Result]struct{}
+}
+
+// pending is an accepted mutation awaiting state confirmation.
+type pending struct {
+	mutation uint64
+	action   Action
+	hash     string
+	url      string // recorded for ref-conflict comparison (add)
+	delFiles bool
+	deadline time.Time
+}
+
+// refRecord is the terminal record of one completed (or stage-1
+// rejected) ref, kept for replay handling.
+type refRecord struct {
+	ref      string
+	action   Action
+	hash     string
+	url      string
+	delFiles bool
+	outcome  string // stage-1 rejection code; "" when it reached stage 2
+	status   string // confirmed | timeout
+	mutation uint64
+}
+
+func (r *refRecord) matches(req Request) bool {
+	return r.action == req.Action && r.hash == req.Hash &&
+		r.url == req.URL && r.delFiles == req.DeleteFiles
+}
+
+func (p *pending) matches(req Request) bool {
+	return p.action == req.Action && p.hash == req.Hash &&
+		p.url == req.URL && p.delFiles == req.DeleteFiles
+}
+
+// New creates a Mutator. Call Run alongside the syncer.
+func New(backend Backend, src StateSource, opts Options, log *slog.Logger) *Mutator {
+	opts.fill()
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Mutator{
+		backend:  backend,
+		src:      src,
+		log:      log,
+		opts:     opts,
+		inflight: map[string]*pending{},
+		subs:     map[chan Result]struct{}{},
+	}
+}
+
+// magnetHashRe validates the btih payload of a magnet xt parameter.
+var btihRe = regexp.MustCompile(`^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$`)
+
+// ParseMagnetHash extracts the (lowercased) infohash from a magnet URI.
+// Base32 btih forms are a documented 0.3 limitation: hex only.
+func ParseMagnetHash(u string) (string, bool) {
+	if !strings.HasPrefix(u, "magnet:?") {
+		return "", false
+	}
+	for _, kv := range strings.Split(u[len("magnet:?"):], "&") {
+		if v, ok := strings.CutPrefix(kv, "xt=urn:btih:"); ok {
+			if btihRe.MatchString(v) {
+				return strings.ToLower(v), true
+			}
+		}
+	}
+	return "", false
+}
+
+// Submit validates and executes one mutation request. It may block up
+// to SubmitTimeout on the backend call; the context is daemon-owned
+// (NOT tied to an IPC connection) so a disconnect cannot abort a
+// half-submitted mutation.
+func (m *Mutator) Submit(req Request) Stage1 {
+	req.Hash = strings.ToLower(req.Hash)
+
+	// Replay handling: an in-flight or completed ref never re-executes.
+	m.mu.Lock()
+	if p, ok := m.inflight[req.Ref]; ok {
+		if !p.matches(req) {
+			m.mu.Unlock()
+			return Stage1{Outcome: CodeRefConflict}
+		}
+		s1 := Stage1{Outcome: OutcomeAccepted, Mutation: p.mutation, Action: p.action, Hash: p.hash}
+		m.mu.Unlock()
+		return s1
+	}
+	for i := range m.ring {
+		if m.ring[i].ref == req.Ref {
+			r := m.ring[i]
+			m.mu.Unlock()
+			if !r.matches(req) {
+				return Stage1{Outcome: CodeRefConflict}
+			}
+			if r.outcome != "" {
+				return Stage1{Outcome: r.outcome}
+			}
+			return Stage1{Replay: &Result{Mutation: r.mutation, Action: r.action, Hash: r.hash, Status: r.status}}
+		}
+	}
+	m.mu.Unlock()
+
+	// Semantic validation against the committed state (never the
+	// backend): mutations only touch torrents the daemon knows exist.
+	st := m.src.State()
+	var wantHash string
+	switch req.Action {
+	case Pause, Resume, Remove:
+		if _, ok := st.Torrents[req.Hash]; !ok {
+			return m.reject(req, 0, CodeStaleTorrent)
+		}
+	case Add:
+		h, ok := ParseMagnetHash(req.URL)
+		if !ok {
+			return m.reject(req, 0, CodeInvalidURL)
+		}
+		wantHash = h
+		if _, ok := st.Torrents[h]; ok {
+			return m.reject(req, 0, CodeDuplicate)
+		}
+	default:
+		return m.reject(req, 0, CodeBackendRejected)
+	}
+	if !st.BackendOK {
+		return m.reject(req, 0, CodeBackendUnavailable)
+	}
+
+	// Register in-flight under the lock (concurrent same-ref submissions
+	// converge here), enforcing the daemon-wide cap.
+	hash := req.Hash
+	if req.Action == Add {
+		hash = wantHash
+	}
+	m.mu.Lock()
+	if p, ok := m.inflight[req.Ref]; ok {
+		// Lost a race with an identical submission: return that one.
+		if !p.matches(req) {
+			m.mu.Unlock()
+			return Stage1{Outcome: CodeRefConflict}
+		}
+		s1 := Stage1{Outcome: OutcomeAccepted, Mutation: p.mutation, Action: p.action, Hash: p.hash}
+		m.mu.Unlock()
+		return s1
+	}
+	if len(m.inflight) >= m.opts.MaxInFlight {
+		m.mu.Unlock()
+		return Stage1{Outcome: CodeBusy}
+	}
+	m.nextMut++
+	mut := m.nextMut
+	m.inflight[req.Ref] = &pending{
+		mutation: mut,
+		action:   req.Action,
+		hash:     hash,
+		url:      req.URL,
+		delFiles: req.DeleteFiles,
+		deadline: time.Now().Add(m.opts.ReconcileWindow),
+	}
+	m.mu.Unlock()
+
+	// Submit to the backend with a daemon-owned timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), m.opts.SubmitTimeout)
+	defer cancel()
+	err := m.submit(ctx, req, st.WebAPIVersion)
+
+	if err != nil {
+		m.mu.Lock()
+		delete(m.inflight, req.Ref)
+		m.appendRingLocked(refRecord{ref: req.Ref, action: req.Action, hash: hash,
+			url: req.URL, delFiles: req.DeleteFiles, outcome: classifySubmit(err)})
+		m.mu.Unlock()
+		m.log.Warn("mutation rejected by backend",
+			"action", string(req.Action), "mutation", mut, "error", classifySubmit(err))
+		return Stage1{Outcome: classifySubmit(err)}
+	}
+
+	m.log.Info("mutation accepted", "action", string(req.Action), "mutation", mut)
+	return Stage1{Outcome: OutcomeAccepted, Mutation: mut, Action: req.Action, Hash: hash}
+}
+
+// submit performs the backend call, choosing endpoint generations by
+// the probed WebAPI version (docs/QBITTORRENT.md: stop/start on
+// ≥ 2.11.0; pause/resume were REMOVED in qBittorrent 5.x). An unknown
+// version defaults to the modern endpoints: the reference deployments
+// are 5.x and the syncer normally probes the version before mutations
+// are possible (state is non-empty).
+func (m *Mutator) submit(ctx context.Context, req Request, webapiVersion string) error {
+	modern := webapiVersion == "" || webapiAtLeast(webapiVersion, 2, 11, 0)
+	switch req.Action {
+	case Pause:
+		if modern {
+			return m.backend.StopTorrent(ctx, req.Hash)
+		}
+		return m.backend.PauseTorrent(ctx, req.Hash)
+	case Resume:
+		if modern {
+			return m.backend.StartTorrent(ctx, req.Hash)
+		}
+		return m.backend.ResumeTorrent(ctx, req.Hash)
+	case Add:
+		echo, err := m.backend.AddMagnet(ctx, req.URL)
+		if err != nil {
+			return err
+		}
+		// Cross-check the backend's echo when it provides one (≥ 5.2.0):
+		// identity must match the hash the daemon parsed from the magnet.
+		if len(echo) > 0 {
+			h, _ := ParseMagnetHash(req.URL)
+			if echo[0] != h {
+				return fmt.Errorf("backend echoed foreign hash (len %d)", len(echo[0]))
+			}
+		}
+		return nil
+	case Remove:
+		return m.backend.DeleteTorrent(ctx, req.Hash, req.DeleteFiles)
+	}
+	return fmt.Errorf("unknown action")
+}
+
+// reject records a stage-1 rejection for the ref (replay must not later
+// execute what was refused) and returns the Stage1 answer.
+func (m *Mutator) reject(req Request, mut uint64, code string) Stage1 {
+	m.mu.Lock()
+	m.appendRingLocked(refRecord{ref: req.Ref, action: req.Action, hash: req.Hash,
+		url: req.URL, delFiles: req.DeleteFiles, outcome: code, mutation: mut})
+	m.mu.Unlock()
+	return Stage1{Outcome: code}
+}
+
+// Run drives reconciliation: committed-state changes (instant) plus a
+// ticker (window expiry) settle in-flight mutations and publish results.
+func (m *Mutator) Run(ctx context.Context) {
+	_, events, cancel := m.src.Subscribe()
+	defer cancel()
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-events:
+			if !ok {
+				events = nil // source dropped us; ticker keeps reconciling
+				continue
+			}
+			m.reconcile()
+		case <-tick.C:
+			m.reconcile()
+		}
+	}
+}
+
+// reconcile settles in-flight mutations against the committed state.
+func (m *Mutator) reconcile() {
+	st := m.src.State()
+	now := time.Now()
+
+	m.mu.Lock()
+	var finished []Result
+	for ref, p := range m.inflight {
+		if status, done := checkIntent(p, st); done {
+			finished = append(finished, Result{Mutation: p.mutation, Action: p.action, Hash: p.hash, Status: status})
+			m.appendRingLocked(refRecord{ref: ref, action: p.action, hash: p.hash,
+				url: p.url, delFiles: p.delFiles, status: status, mutation: p.mutation})
+			delete(m.inflight, ref)
+		} else if now.After(p.deadline) {
+			finished = append(finished, Result{Mutation: p.mutation, Action: p.action, Hash: p.hash, Status: StatusTimeout})
+			m.appendRingLocked(refRecord{ref: ref, action: p.action, hash: p.hash,
+				url: p.url, delFiles: p.delFiles, status: StatusTimeout, mutation: p.mutation})
+			delete(m.inflight, ref)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, r := range finished {
+		m.log.Info("mutation result", "action", string(r.Action), "mutation", r.Mutation, "status", r.Status)
+		m.publish(r)
+	}
+}
+
+// checkIntent reports whether the committed state satisfies the
+// mutation's intent. A degraded backend state never confirms.
+func checkIntent(p *pending, st state.State) (string, bool) {
+	if !st.BackendOK {
+		return "", false
+	}
+	switch p.action {
+	case Pause:
+		if t, ok := st.Torrents[p.hash]; ok && t.State == state.StatePaused {
+			return StatusConfirmed, true
+		}
+	case Resume:
+		if t, ok := st.Torrents[p.hash]; ok && t.State != state.StatePaused {
+			return StatusConfirmed, true
+		}
+	case Add:
+		if _, ok := st.Torrents[p.hash]; ok {
+			return StatusConfirmed, true
+		}
+	case Remove:
+		if _, ok := st.Torrents[p.hash]; !ok {
+			return StatusConfirmed, true
+		}
+	}
+	return "", false
+}
+
+// Results subscribes to terminal results (broadcast). The channel is
+// dropped (closed) for slow consumers.
+func (m *Mutator) Results() (<-chan Result, func()) {
+	ch := make(chan Result, 16)
+	m.mu.Lock()
+	m.subs[ch] = struct{}{}
+	m.mu.Unlock()
+	cancel := func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if _, ok := m.subs[ch]; ok {
+			delete(m.subs, ch)
+			close(ch)
+		}
+	}
+	return ch, cancel
+}
+
+func (m *Mutator) publish(r Result) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for ch := range m.subs {
+		select {
+		case ch <- r:
+		default:
+			// Slow consumer: its view would be stale; drop it.
+			delete(m.subs, ch)
+			close(ch)
+		}
+	}
+}
+
+// appendRingLocked appends one completed record, overwriting the oldest
+// beyond RingSize (bounded memory). Caller holds m.mu.
+func (m *Mutator) appendRingLocked(rec refRecord) {
+	if len(m.ring) >= m.opts.RingSize {
+		copy(m.ring, m.ring[1:])
+		m.ring[len(m.ring)-1] = rec
+		return
+	}
+	m.ring = append(m.ring, rec)
+}
+
+// classifySubmit maps adapter errors to deterministic rejection codes.
+func classifySubmit(err error) string {
+	switch {
+	case errors.Is(err, qbittorrent.ErrUnreachable),
+		errors.Is(err, qbittorrent.ErrBanned),
+		errors.Is(err, qbittorrent.ErrBadCredentials),
+		errors.Is(err, qbittorrent.ErrUnauthorized):
+		return CodeBackendUnavailable
+	case errors.Is(err, qbittorrent.ErrConflict):
+		return CodeBackendRejected
+	default:
+		return CodeBackendRejected
+	}
+}
+
+// webapiAtLeast compares a dotted WebAPI version ("2.11.0") against a
+// minimum. Unparseable components make the whole version unparseable
+// (false) — callers decide the fallback.
+func webapiAtLeast(v string, major, minor, patch int) bool {
+	parts := strings.SplitN(strings.TrimSpace(v), ".", 3)
+	if len(parts) == 0 {
+		return false
+	}
+	nums := make([]int, 3)
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return false
+		}
+		nums[i] = n
+	}
+	if nums[0] != major {
+		return nums[0] > major
+	}
+	if nums[1] != minor {
+		return nums[1] > minor
+	}
+	return nums[2] >= patch
+}

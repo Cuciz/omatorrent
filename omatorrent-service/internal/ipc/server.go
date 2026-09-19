@@ -46,6 +46,7 @@ type Server struct {
 	socketPath string
 	handler    Handler
 	subs       Subscriptions
+	muts       Mutations
 	log        *slog.Logger
 
 	ln        net.Listener
@@ -53,6 +54,8 @@ type Server struct {
 	sockIno   uint64
 	mu        sync.Mutex
 	clients   map[net.Conn]struct{}
+	mutConns  map[*connIO]struct{} // connections latched for result pushes (v1.2)
+	pumpStop  chan struct{}
 	closing   bool
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -161,8 +164,9 @@ func ensureAppDir(dir string) error {
 }
 
 // New validates the socket path and prepares the server. Call Serve to
-// accept connections.
-func New(socketPath string, handler Handler, subs Subscriptions, log *slog.Logger) (*Server, error) {
+// accept connections. subs/muts may be nil to disable the corresponding
+// v1.x extension surfaces.
+func New(socketPath string, handler Handler, subs Subscriptions, muts Mutations, log *slog.Logger) (*Server, error) {
 	if handler == nil {
 		return nil, fmt.Errorf("ipc: nil handler")
 	}
@@ -173,8 +177,10 @@ func New(socketPath string, handler Handler, subs Subscriptions, log *slog.Logge
 		socketPath: socketPath,
 		handler:    handler,
 		subs:       subs,
+		muts:       muts,
 		log:        log,
 		clients:    make(map[net.Conn]struct{}),
+		mutConns:   make(map[*connIO]struct{}),
 	}, nil
 }
 
@@ -338,6 +344,19 @@ func (s *Server) Serve() error {
 	s.ln = ln
 	s.mu.Unlock()
 
+	// v1.2: broadcast terminal mutation results to listening conns.
+	if s.muts != nil {
+		s.mu.Lock()
+		s.pumpStop = make(chan struct{})
+		stop := s.pumpStop
+		s.mu.Unlock()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.pumpResults(stop)
+		}()
+	}
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -374,6 +393,31 @@ func (s *Server) Serve() error {
 	}
 }
 
+// pumpResults forwards terminal mutation results to every connection
+// that has issued at least one mutation request (ADR-0006: pure status
+// clients never receive them). Slow consumers are disconnected by the
+// ordinary connIO queue rule.
+func (s *Server) pumpResults(stop <-chan struct{}) {
+	ch, cancel := s.muts.Results()
+	defer cancel()
+	for {
+		select {
+		case <-stop:
+			return
+		case r, ok := <-ch:
+			if !ok {
+				return
+			}
+			frame := EncodeMutationResult(r)
+			s.mu.Lock()
+			for c := range s.mutConns {
+				c.send(frame)
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
 // Close shuts down: closes the listener and every client connection,
 // waits for handlers, then removes the socket only if its file identity
 // still matches the one this process created. It is idempotent.
@@ -382,10 +426,15 @@ func (s *Server) Close() {
 		s.mu.Lock()
 		s.closing = true
 		ln := s.ln
+		stop := s.pumpStop
+		s.pumpStop = nil
 		for c := range s.clients {
 			c.Close()
 		}
 		s.mu.Unlock()
+		if stop != nil {
+			close(stop)
+		}
 		if ln != nil {
 			ln.Close()
 		}
@@ -419,6 +468,7 @@ func (s *Server) handle(conn net.Conn) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.clients, conn)
+		delete(s.mutConns, c)
 		s.mu.Unlock()
 		c.teardown()
 	}()
@@ -490,6 +540,34 @@ func (s *Server) handle(conn net.Conn) {
 				// working and the connection stays open (documented in
 				// docs/IPC.md v1.1 lifecycle).
 				c.send(EncodeError(failCode(errUnsupported)))
+			}
+		case "torrent.pause", "torrent.resume", "torrent.add", "torrent.remove":
+			// v1.2 (ADR-0006). Submit blocks up to the bounded backend
+			// submission timeout — lockstep discipline keeps this safe:
+			// one mutation in flight per connection by construction.
+			if s.muts == nil {
+				c.send(EncodeError(failCode(errUnsupported)))
+				return
+			}
+			s.mu.Lock()
+			if !s.closing {
+				s.mutConns[c] = struct{}{} // latch: this conn receives result pushes
+			}
+			s.mu.Unlock()
+			s1 := s.muts.Submit(MutationRequest{
+				Action:      req.Type,
+				Hash:        req.Hash,
+				URL:         req.URL,
+				DeleteFiles: req.DeleteFiles,
+				Ref:         req.Ref,
+			})
+			switch {
+			case s1.Replay != nil:
+				c.send(EncodeMutationResultWithID(req.ID, *s1.Replay))
+			case s1.Outcome == "accepted":
+				c.send(EncodeMutationAccepted(req.ID, s1.Mutation, s1.Action, s1.Hash))
+			default:
+				c.send(EncodeMutationRejected(req.ID, s1.Outcome))
 			}
 		default:
 			c.send(EncodeError(failCode(errUnsupported)))
