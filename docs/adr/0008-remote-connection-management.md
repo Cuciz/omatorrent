@@ -212,13 +212,29 @@ list extended.
   `secrets_unavailable`, `mutations_pending`, `pin_unknown`,
   `storage_error`).
 
-  Post-review amendments (implemented): the previous secret is
-  snapshotted before the secret op and restored if anything later in
-  the activation fails (no half-applied credential state — security
-  review finding 2), and credential-bearing `connection.test` logins
-  are paced (one per 5 s window; excess refused without backend
-  contact) so a retry loop cannot walk into qBittorrent's IP ban
-  (security review finding 4).
+  Post-review amendments (implemented): credential-bearing
+  `connection.test` logins are paced (one per 5 s window; excess
+  refused without backend contact) so a retry loop cannot walk into
+  qBittorrent's IP ban (security review finding 4).
+
+  Transactional activation (external review round 2, blockers 2+3):
+  every Configure transaction snapshots its rollback targets LOCALLY
+  at start — the persisted profile as RAW BYTES (exact restore, never
+  a re-marshal; an unpersisted fallback restores to "no file"; an
+  unreadable-but-present store refuses the transaction up front) and,
+  for `replace`/`delete`, the previous secret's exact presence/value.
+  `keep` never touches the provider and never participates in secret
+  rollback. A `replace`/`delete` whose previous-state snapshot cannot
+  be read is rejected (`secrets_unavailable`) BEFORE any mutation — a
+  provider error is never interpreted as "no secret exists". On any
+  post-snapshot failure the transaction restores exactly what was
+  snapshotted: the currently active state, never a stale earlier one
+  (A→B succeeding then B→C failing restores B — regression-pinned
+  including the restart path). If a restoration itself fails, the
+  original rejection code is returned and the failure is logged with a
+  classified, secret-free message; the mismatch then surfaces
+  truthfully through the connection status (documented decision: no
+  separate IPC rollback-failure code).
 
 Compatibility: no existing message shape gains a field; clients that
 never send `connection.*` see no difference. The protocol stays

@@ -183,6 +183,49 @@ and live smoke re-run green afterwards)
 | Arch F1 (MEDIUM): ADR-promised logout-on-switch unimplemented | Configure fire-and-forget best-effort `auth/logout` on the superseded client (2 s budget, no credentials in request); startup client attached in main (`TestSwitchLogsOutOldSession`) |
 | Arch F2/F3/F4 (doc drift) | IPC.md status example now shows url/pin/epoch-starts-at-0 and detail-omitempty; ADR-0008 schema-field claim corrected; ADR-0009 Provider interface + ASCII-label rationale updated; post-review amendments recorded in ADR-0008 |
 
+## External review round 2 (post-7d97c01, addressed)
+
+The external review of head `7d97c01` found three blockers and one
+hardening gap; all are fixed with targeted regression tests
+(`internal/connection/policy_rollback_test.go`) and the full suite +
+smoke re-run green:
+
+1. **Startup HTTP-policy bypass** — `Profile.Validate` previously did
+   not judge the HTTP policy, so a hand-edited/stale `connection.json`
+   with remote HTTP and `allow_insecure_http:false` was accepted on
+   daemon restart. FIX: the policy now lives INSIDE `Profile.Validate`,
+   which every activation path runs (persisted load, service.json
+   fallback, daemon-side save, client build) — startup is exactly as
+   strict as configure. `connection.status`'s `insecure` is now the
+   FACTUAL transport state (`non-loopback && http`), independent of
+   consent. Tests: policy matrix (loopback/acked-remote/un-acked-
+   remote/https), forged-raw-bytes load refusal, factual-status.
+2. **Rollback target stale after multi-switch** — a long-lived
+   `prevProfile` field made a failed B→C restore A. FIX: every
+   Configure transaction snapshots the persisted profile as RAW BYTES
+   at its start (`ReadStoreRaw`, exact restore via `SaveStoreRaw`;
+   unpersisted fallback restores to no-file; an unreadable store
+   refuses the transaction up front). Tests: A→B ok, B→C
+   `storage_error` → runtime B, disk B, secret B, restart loads B, A
+   never resurrected; byte-exact restore incl. absence.
+3. **Secret snapshot error ambiguity** — the previous-secret `Get`
+   error was ignored (a provider hiccup read as "absent", and `keep`
+   transactions could roll back onto a live secret). FIX: `keep` never
+   touches the provider; `replace`/`delete` REQUIRE a recoverable
+   snapshot before any mutation (unusable snapshot ⇒ rejected
+   `secrets_unavailable`, zero changes); a provider error is never
+   "absent"; failed restorations keep the original rejection code and
+   are logged secret-free (documented: no separate rollback-failure
+   IPC code — the mismatch surfaces truthfully via status). Tests: the
+   full six-case matrix incl. restore-of-absence and a failing
+   restoration.
+4. **Percent-encoded path attacks** — `/%2e%2e`, `/%2f`, `/%5c`,
+   double-encoded forms were accepted by the escaped-path rules. FIX:
+   base paths reject ANY percent-encoding (ambiguity rule: a proxy may
+   decode/normalize before routing; the accepted prefix must remain
+   the same canonical prefix under any ordinary decoding). Tests:
+   17-case attack matrix + plain-prefix acceptance.
+
 ## Known limitations
 
 - `connection.test`/`connection.configure` carry the password once per

@@ -394,8 +394,12 @@ configured switch; `detail` is omitted when empty.)
   it — like `username`, status surfaces display only `host`).
 - `host` — display-safe label `host[:port][/path]`, capped at 128 runes;
   never a userinfo, secret or full URL echo.
-- `transport` — `http` | `https`; `insecure` — true iff non-loopback
-  HTTP is running under the explicit user acknowledgement.
+- `transport` — `http` | `https`; `insecure` — the FACTUAL transport
+  state: true iff the active transport is non-loopback plain HTTP,
+  independent of consent (`allow_insecure_http` is the persisted
+  permission; a remote-HTTP profile can only be active WITH it, so
+  `insecure` can never launder reality — remote HTTP in use with
+  `insecure:false` is unreachable).
 - `username` — non-secret (the settings form prefills it; status
   surfaces should display only `host`); `has_secret` — stored
   credential exists (bool, never the value).

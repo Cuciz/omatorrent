@@ -101,10 +101,10 @@ type Manager struct {
 	testPace    time.Duration
 	offered     map[string][]byte
 	offeredIO   []string // insertion order for the bounded cache
-	// prevProfile is the last successfully activated profile (rollback
-	// reference if a switch fails after the file write).
-	prevProfile Profile
-	prevValid   bool
+	// (Rollback state is NOT kept here: every Configure transaction
+	// snapshots the currently-active profile locally at its start —
+	// a long-lived prev field would restore a stale target after
+	// multi-switch sequences; external review round 2, blocker 2.)
 }
 
 // LoadActive resolves the active profile: the persisted store when
@@ -153,7 +153,6 @@ func NewManager(storePath string, fallback Profile, prov secrets.Provider, state
 		return nil, err
 	}
 	m.profile, m.endpoint, m.valid = p, ep, true
-	m.prevProfile, m.prevValid = m.profile, m.valid
 
 	// Secret presence is refreshed asynchronously: the provider may be
 	// slow (subprocess) and startup must not block on it.
@@ -234,7 +233,12 @@ func (m *Manager) Status() Status {
 	} else {
 		st.Mode = "remote"
 	}
-	st.Insecure = !ep.IsLoopback && ep.Scheme == "http" && p.AllowInsecureHTTP
+	// FACTUAL transport state, independent of consent: non-loopback
+	// plain HTTP is insecure whether or not the user acknowledged it
+	// (allow_insecure_http is permission; this is reality). Such a
+	// profile can only be ACTIVE with the acknowledgement — the flag
+	// can never launder reality into secure-looking output.
+	st.Insecure = ep.InsecureTransport()
 	if !valid {
 		st.Status = StatusInvalidConfig
 		st.Detail = "profile failed validation"
@@ -556,13 +560,42 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 		next.TLSMode = TLSSystem
 	}
 
-	// Snapshot the previous secret so any later failure can roll the
-	// credential state back (security review F2).
+	// TRANSACTION SNAPSHOT (external review round 2, blocker 2): the
+	// rollback target is the persisted state as it is RIGHT NOW,
+	// captured per transaction as RAW BYTES — never a long-lived prev
+	// field, never a re-marshal. A→B succeeding and then B→C failing
+	// must restore B exactly; an unpersisted fallback state restores to
+	// "no file". An unreadable-but-present store rejects up front: a
+	// transaction whose rollback target cannot be captured must not
+	// start.
+	beforeBytes, beforeExisted, err := ReadStoreRaw(m.storePath)
+	if err != nil {
+		return ConfigureResult{Rejection: RejectStorageError}
+	}
+
 	sctx, cancel := context.WithTimeout(ctx, secretsOpBudget)
 	defer cancel()
-	prevSecret, prevExists, _ := m.secrets.Get(sctx)
-	if prevSecret != nil {
-		defer secrets.Wipe(prevSecret)
+
+	// SECRET SNAPSHOT (external review round 2, blocker 3): `keep`
+	// never touches the provider. `replace`/`delete` REQUIRE a
+	// recoverable previous-state snapshot BEFORE any mutation — a
+	// provider error is NEVER interpreted as "no secret exists"; it
+	// rejects the whole operation with no config/store/backend change.
+	var prevSecret []byte
+	var prevExists bool
+	needsSecretRollback := false
+	switch p.SecretAction {
+	case "keep":
+		// no snapshot, no mutation, no rollback — ever
+	case "replace", "delete":
+		sec, exists, err := m.secrets.Get(sctx)
+		if err != nil {
+			return ConfigureResult{Rejection: RejectSecretsMissing}
+		}
+		prevSecret, prevExists, needsSecretRollback = sec, exists, true
+		if prevSecret != nil {
+			defer secrets.Wipe(prevSecret)
+		}
 	}
 
 	// Mutation-retargeting guard: drain the mutator (refuses while in
@@ -574,8 +607,10 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	}
 	fail := func(code string) ConfigureResult {
 		m.mutator.AbortSwitch()
-		m.rollbackSecret(prevSecret, prevExists)
-		m.rollbackStore()
+		if needsSecretRollback {
+			m.rollbackSecret(prevSecret, prevExists)
+		}
+		m.rollbackStoreBytes(beforeBytes, beforeExisted)
 		return ConfigureResult{Rejection: code}
 	}
 
@@ -617,7 +652,6 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	m.mu.Lock()
 	oldClient := m.current
 	m.current = client
-	m.prevProfile, m.prevValid = m.profile, m.valid
 	m.profile, m.endpoint, m.valid = next, ep, true
 	m.epoch++
 	switch p.SecretAction {
@@ -649,8 +683,15 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	return ConfigureResult{OK: true, Epoch: epoch, Mode: mode, Host: truncateRunes(ep.Host, 128), Transport: ep.Scheme}
 }
 
-// rollbackSecret restores the previous secret after a failed
-// configuration (best effort; security review F2).
+// rollbackSecret restores the exact previous secret PRESENCE and
+// VALUE after a failed replace/delete configuration (best effort;
+// security review F2 + external review round 2 blocker 3). `keep`
+// callers never invoke it. A restoration failure is logged with a
+// classified, secret-free message and surfaces truthfully through the
+// connection status (auth_failed / secrets_unavailable) — the
+// original rejection code is still returned (documented decision: no
+// separate IPC rollback-failure code; the daemon never reports a
+// successful activation it did not perform).
 func (m *Manager) rollbackSecret(prev []byte, exists bool) {
 	sctx, cancel := context.WithTimeout(context.Background(), secretsOpBudget)
 	defer cancel()
@@ -674,21 +715,18 @@ func (m *Manager) rollbackSecret(prev []byte, exists bool) {
 	}
 }
 
-// rollbackStore restores the previously activated profile file after a
-// failed post-write switch (best effort; failures are logged).
-func (m *Manager) rollbackStore() {
-	m.mu.Lock()
-	prev, valid := m.prevProfile, m.prevValid
-	m.mu.Unlock()
-	if !valid {
-		// Nothing was active before: remove the file so the fallback
-		// profile applies again on restart.
+// rollbackStoreBytes restores the EXACT pre-transaction persisted
+// bytes after a failed activation (the runtime state was never
+// swapped, so only the file needs restoring). Best effort; failures
+// are logged with classified, secret-free messages.
+func (m *Manager) rollbackStoreBytes(before []byte, existed bool) {
+	if !existed {
 		if err := removeStore(m.storePath); err != nil {
 			m.log.Error("connection rollback failed", "error", err)
 		}
 		return
 	}
-	if err := SaveStore(m.storePath, prev); err != nil {
+	if err := SaveStoreRaw(m.storePath, before); err != nil {
 		m.log.Error("connection rollback failed", "error", err)
 	}
 }

@@ -151,7 +151,14 @@ func validPort(p string) string {
 }
 
 // normalizePath cleans a prefix path: leading '/', no trailing '/',
-// no '.'/'..' segments, bounded length. Returns "" when invalid.
+// no '.'/'..' segments, bounded length, and NO percent-encodings at
+// all. Encoded separators/dot-segments (%2f, %5c, %2e, %252e …) are
+// ambiguous: a reverse proxy may decode or normalize the path before
+// routing, and the accepted prefix must remain the same canonical
+// prefix under any ordinary decoding — a request must never escape
+// toward an unintended origin (external review round 2, blocker 4).
+// Rejecting every encoding is deliberately stricter than needed;
+// base-path prefixes are plain ASCII by construction.
 func normalizePath(p string) string {
 	if !strings.HasPrefix(p, "/") {
 		return ""
@@ -161,6 +168,15 @@ func normalizePath(p string) string {
 	}
 	if strings.Contains(p[1:], "//") {
 		return "" // empty segments are ambiguous, not normalized
+	}
+	if strings.Contains(p, "%") {
+		decoded, err := url.PathUnescape(p)
+		if err != nil {
+			return "" // malformed encoding
+		}
+		if decoded != p {
+			return "" // ANY percent-encoding is rejected (ambiguity)
+		}
 	}
 	segments := strings.Split(strings.TrimSuffix(p, "/"), "/")[1:]
 	for _, s := range segments {
@@ -189,11 +205,14 @@ func DefaultProfile() Profile {
 	return Profile{URL: "http://127.0.0.1:8080", TLSMode: TLSSystem}
 }
 
-// Validate checks the profile's semantic consistency and returns its
-// normalized endpoint. The HTTP policy (allow_insecure_http) is NOT
-// judged here — callers decide whether an acknowledged insecure
-// profile may activate (configure requires the explicit flag, the
-// running daemon reports it as insecure).
+// Validate checks the profile's semantic consistency AND its transport
+// policy, and returns the normalized endpoint. Every activation path
+// runs through here — persisted-profile loads, the service.json
+// fallback, daemon-side saves and client builds — so a profile that
+// validates can never run remote plain HTTP without the explicit
+// acknowledgement (external review round 2, blocker 1: startup must
+// enforce exactly what configure enforces; loopback HTTP stays free,
+// HTTPS is always allowed).
 func (p Profile) Validate() (Endpoint, error) {
 	if len(p.Username) > MaxUserLen {
 		return Endpoint{}, fmt.Errorf("username exceeds %d runes", MaxUserLen)
@@ -219,7 +238,23 @@ func (p Profile) Validate() (Endpoint, error) {
 	default:
 		return Endpoint{}, fmt.Errorf("unknown TLS mode")
 	}
-	return ValidateURL(p.URL)
+	ep, err := ValidateURL(p.URL)
+	if err != nil {
+		return Endpoint{}, err
+	}
+	if !ep.IsLoopback && ep.Scheme == "http" && !p.AllowInsecureHTTP {
+		return Endpoint{}, fmt.Errorf("plain HTTP to a non-loopback host requires the explicit allow_insecure_http acknowledgement")
+	}
+	return ep, nil
+}
+
+// InsecureTransport reports the FACTUAL transport state: non-loopback
+// plain HTTP, independent of consent (allow_insecure_http is
+// permission; this is reality — a remote-HTTP profile can only be
+// active WITH the acknowledgement, but the flag itself must never
+// launder an insecure transport into a secure-looking one).
+func (ep Endpoint) InsecureTransport() bool {
+	return !ep.IsLoopback && ep.Scheme == "http"
 }
 
 func decodeHex(s string) ([]byte, error) {

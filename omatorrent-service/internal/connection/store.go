@@ -93,24 +93,70 @@ func LoadStore(path string) (Profile, bool, error) {
 	return p, true, nil
 }
 
-// SaveStore atomically writes the profile: 0700 directory (created if
-// missing, never repaired), exclusive-create 0600 temp file in the
-// same directory, fsync, rename over the target (a symlink at the
-// target is replaced, not followed), directory fsync.
+// ReadStoreRaw returns the raw persisted bytes (same safety checks as
+// LoadStore: O_NOFOLLOW, permissive/refusing stat, bounded size) so a
+// Configure transaction can restore the EXACT pre-transaction
+// persisted state on failure (external review round 2, blocker 2).
+// exists=false only for a missing file; anything unreadable is an
+// error — never silently treated as absent.
+func ReadStoreRaw(path string) (data []byte, exists bool, err error) {
+	if err := refuseSymlinkedDir(filepath.Dir(path)); err != nil {
+		return nil, true, err
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, true, fmt.Errorf("connection: refusing symlinked profile %s", path)
+		}
+		return nil, true, fmt.Errorf("connection: open %s: %w", path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, true, fmt.Errorf("connection: stat %s: %w", path, err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, true, fmt.Errorf("connection: %s must not be group/world accessible (mode %04o)", path, info.Mode().Perm())
+	}
+	if !info.Mode().IsRegular() {
+		return nil, true, fmt.Errorf("connection: %s is not a regular file", path)
+	}
+	data, err = io.ReadAll(io.LimitReader(f, MaxProfileBytes+1))
+	if err != nil {
+		return nil, true, fmt.Errorf("connection: read %s: %w", path, err)
+	}
+	if len(data) > MaxProfileBytes {
+		return nil, true, fmt.Errorf("connection: %s exceeds %d bytes", path, MaxProfileBytes)
+	}
+	return data, true, nil
+}
+
+// SaveStore validates and atomically writes the profile (see
+// SaveStoreRaw for the write mechanics).
 func SaveStore(path string, p Profile) error {
 	if _, err := p.Validate(); err != nil {
 		return fmt.Errorf("connection: refusing to save invalid profile: %w", err)
 	}
-	dir := filepath.Dir(path)
-	if err := ensurePrivateDir(dir); err != nil {
-		return err
-	}
-
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return fmt.Errorf("connection: encode profile: %w", err)
 	}
 	data = append(data, '\n')
+	return SaveStoreRaw(path, data)
+}
+
+// SaveStoreRaw atomically writes raw (previously validated) bytes:
+// 0700 directory (created if missing, never repaired), exclusive-create
+// 0600 temp file in the same directory, fsync, rename over the target
+// (a symlink at the target is replaced, not followed), directory fsync.
+func SaveStoreRaw(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := ensurePrivateDir(dir); err != nil {
+		return err
+	}
 
 	oldMask := syscall.Umask(0o077)
 	tmp, err := os.OpenFile(filepath.Join(dir, ".connection.json.tmp"),
