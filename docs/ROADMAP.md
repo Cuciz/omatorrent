@@ -19,7 +19,20 @@ Dependencies and exit criteria use the evidence rules from
 | 0.9 | CI, update/rollback, hardening | all | CI green on tagged runs; upgrade + rollback tested; release gates pass |
 | 1.0 | Release | 0.9 | full release gate run (omatorrent-release skill) READY verdict |
 
-## Phase 0.2 — incremental state + panel (IMPLEMENTED 2026-09-18, PR pending review)
+## Phase 0.4 — Dashboard (CURRENT, 2026-09-19)
+
+Large-format native Omarchy dashboard from current, truthful daemon
+state only (no history/metrics persistence — that is 0.8). Depends on
+0.2 state; must not regress 0.3 mutations.
+
+## Phase 0.3 — essential torrent actions (MERGED 2026-09-19 via PR #6 @ fc8615f)
+
+Branch feat/phase03-essential-actions, issue #5 (closed). ADR-0006 IPC
+v1.2 staged mutation contract (pause/resume/add/remove with explicit
+delete-files), order-independent client, ref replay protection,
+disposable-torrent live smoke. See docs/agent/PHASE03.md.
+
+## Phase 0.2 — incremental state + panel (MERGED 2026-09-19 via PR #4 @ 3e090d5)
 
 Branch feat/phase02-incremental-panel, issue #3. sync/maindata rid sync
 (session cookie jar), daemon-side normalized state with last-known-good,
@@ -44,7 +57,7 @@ Remaining from the 0.1 line that Phase 0 deliberately did NOT build
 (they belong to 0.1+ polish or 0.2): nothing blocking; CI workflow
 (0.9), package/install automation (PACKAGING.md).
 
-## Phase 0.1 — bar widget productization (next)
+## Phase 0.1 — bar widget productization (residual polish line; absorbed incrementally into 0.2+ work)
 
 Tighten the proof into the daily-use widget: speed formatting options,
 per-display behavior verification, setting toggles via the native
