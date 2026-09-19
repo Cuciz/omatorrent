@@ -3,6 +3,22 @@
 Tracking: GitHub issue #3; branch `feat/phase02-incremental-panel`.
 Status: COMPLETE (pending PR review). Date: 2026-09-18.
 
+## Final merge record (2026-09-19)
+
+- PR #4 **MERGED** into `main` via merge commit
+  `3e090d5b79af54925faa0d040c8eeecc6e499f52`
+  (normal merge method, matching the PR #2 convention; no squash/rebase).
+- Final accepted head: `1da91d350babca7c8a63a4f3971b0158b7478bfb`
+  (pre-merge verification: OPEN, base `main` @ `9b0ad63`, MERGEABLE/CLEAN,
+  0 review threads, no new commits, no force-push).
+- Issue #3 CLOSED (COMPLETED) by the merge.
+- Final review status: architecture APPROVE-WITH-NOTES, security
+  PASS-WITH-FINDINGS (all findings fixed and verified), QA
+  READY-FOR-REVIEW — round-3 re-review confirmed all 8 findings FIXED.
+- Final benchmark values: the corrected table below is authoritative
+  (1,000-torrent full rebuild 8.09 ms, delta 375 µs, read 347 µs;
+  delta cycle is O(N + delta)).
+
 ## Delivered
 
 ```
