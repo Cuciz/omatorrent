@@ -93,14 +93,21 @@ window: pause ⇒ state `paused`; resume ⇒ present and not `paused`; add ⇒
 hash present; remove ⇒ hash absent. `timeout` — the window elapsed
 without confirming evidence: the outcome is AMBIGUOUS and is surfaced as
 such; the committed state remains the only authority and the client must
-not auto-retry destructive actions. Result frames are delivered exactly
-once per mutation, on every connection that has issued at least one
-mutation request (pure status clients such as the bar widget never
-receive them), ordered after any prior frames on that connection under
-the lockstep discipline. (AMENDMENT, review: a theoretically stalled
-read loop could let a result push be enqueued before its own
-`mutation.accepted` — clients must treat pushes and request responses
-as independent, id-keyed streams, which the reference panel does.)
+not auto-retry destructive actions. Result frames are pushed at most
+once per live delivery subscription, on every connection that has issued
+at least one mutation request (pure status clients such as the bar
+widget never receive them). AMENDMENT (external review, delivery
+guarantee): the daemon's delivery pump may briefly resubscribe; a result
+published in that gap is not replayed — clients must not depend on
+pushes. The reference client resolves stale pendings with a same-ref
+watchdog query (the daemon replays the recorded outcome; no backend
+execution; never a fresh ref; `torrent.remove` is never automatically
+re-sent — its overlay escalates to the ambiguous state and the state
+stream settles the row). Either legal frame order — result before
+accepted — can occur on one connection; clients must correlate terminal
+pushes by mutation id and buffer unknown ids (bounded early-result map,
+applied when the matching acceptance arrives — the pre-fix reference
+client could leave a stale `torrent.add` overlay in that order).
 
 ### Replay and retry rules (fail-safe, non-durable)
 
@@ -157,7 +164,13 @@ treats optimistic state as authoritative.
 - The daemon now mutates the backend; SECURITY.md's threat surface grows
   accordingly (reviewed there).
 - The QML panel needs a pending-overlay pattern distinct from committed
-  state, plus confirmation flows for both removal variants.
+  state, plus confirmation flows for both removal variants. The request/
+  terminal correlation lives in a pure presentation-side state machine
+  (`plugins/local.omatorrent/MutationClient.js`) shared with the
+  deterministic ordering tests — responses and pushes are
+  order-independent by construction (bounded early-result buffer keyed
+  by mutation id), and a same-ref watchdog resolves results lost to
+  delivery-pump gaps (never for `torrent.remove`).
 - Versioning: hello still reports protocol 1; v1.2 is a compatible
   extension. A future incompatible change bumps to 2.
 

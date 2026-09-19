@@ -4,13 +4,17 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "MutationClient.js" as MC
 
 // OmaTorrent torrent panel: presentation only (ADR-0001). Renders the
 // daemon's normalized torrent state over IPC v1.1 (ADR-0005): one
 // subscription delivers a full snapshot then bounded delta frames; the
 // header polls v1.0 system.status for backend state and global speeds.
-// No qBittorrent API knowledge here — hashes arrive from the daemon and
-// merge semantics are the daemon's.
+// Mutations (v1.2, ADR-0006) go through MutationClient.js — an
+// order-independent correlation state machine (request responses and
+// terminal pushes may arrive in either legal order). No qBittorrent API
+// knowledge here — hashes arrive from the daemon and merge semantics
+// are the daemon's.
 Panel {
   id: root
   moduleName: "local.omatorrent"
@@ -45,9 +49,11 @@ Panel {
 
   // ---- Mutations (v1.2, ADR-0006). Presentation-only intents; the
   //      daemon validates, submits and confirms from committed state.
-  //      Pending overlays are cosmetic — committed state stays the only
-  //      authority and everything pending is dropped on disconnect.
-  property var pendingMutations: ({}) // hash -> {action, mutation?}
+  //      Correlation lives in MutationClient.js (shared with the
+  //      deterministic ordering tests): pending overlays are cosmetic,
+  //      cleared exclusively by terminal outcomes or disconnect, and
+  //      request responses / terminal pushes are order-independent.
+  property var mutState: MC.newState()
   property string mutError: ""
   property real mutErrorSince: 0
   property bool addOpen: false
@@ -55,7 +61,12 @@ Panel {
   property string confirmHash: ""
   property string confirmName: ""
   property int mutSeq: 0 // ref uniqueness within this panel instance
-  property string pendingMutHash: "" // hash of the in-flight mutation request
+  // Watchdog: a pending mutation whose terminal never arrives (e.g. a
+  // result lost while the daemon's delivery pump resubscribed) is
+  // resolved by re-sending the SAME ref (daemon replays the recorded
+  // outcome — no backend execution). torrent.remove is NEVER re-sent:
+  // it escalates to the ambiguity banner (docs/IPC.md client rules).
+  readonly property real mutWatchdogMs: 12000
 
   readonly property string xdgRuntime: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string socketPath: xdgRuntime !== "" ? xdgRuntime + "/omatorrent/service.sock" : ""
@@ -99,30 +110,34 @@ Panel {
   }
 
   // ---- Mutation client discipline (extends the one-in-flight rule to
-  //      "mutation"; ref is unique per ATTEMPT, never reused).
+  //      "mutation"; ref is unique per ATTEMPT, never reused across
+  //      attempts — the watchdog re-sends the SAME ref only).
   function newRef() {
     mutSeq++
     return "p" + Date.now() + "-" + mutSeq
   }
 
-  function requestMutation(action, extra) {
+  // requestMutation is used BOTH for fresh attempts (fresh ref) and for
+  // same-ref watchdog queries (recorded outcome replay, no execution).
+  function requestMutation(action, extra, refOverride) {
     if (pendingKind !== "" || !sock.connected || !helloSent) return false
     pendingKind = "mutation"
     pendingId = nextId++
     pendingSince = Date.now()
-    pendingMutHash = extra && typeof extra.hash === "string" ? extra.hash : ""
-    const msg = Object.assign({ type: action, id: pendingId, ref: newRef() }, extra)
-    send(msg)
+    const ref = refOverride !== undefined ? refOverride : newRef()
+    const hash = extra && typeof extra.hash === "string" ? extra.hash : ""
+    const url = extra && typeof extra.url === "string" ? extra.url : ""
+    const del = extra && extra.delete_files === true
+    MC.begin(mutState, pendingId, action, hash, url, del, ref, Date.now())
+    send(Object.assign({ type: action, id: pendingId, ref: ref }, extra))
+    mutStateChanged()
     return true
   }
 
   function togglePause(hash) {
     const t = torrents[hash]
     if (!t) return
-    const action = t.state === "paused" ? "torrent.resume" : "torrent.pause"
-    if (!requestMutation(action, { hash: hash })) return
-    pendingMutations[hash] = { action: action }
-    pendingMutationsChanged()
+    requestMutation(t.state === "paused" ? "torrent.resume" : "torrent.pause", { hash: hash })
   }
 
   function addMagnet() {
@@ -141,34 +156,13 @@ Panel {
     if (!t) return
     // delete_files is an explicit boolean at every layer (ADR-0006).
     if (!requestMutation("torrent.remove", { hash: hash, delete_files: deleteFiles })) return
-    pendingMutations[hash] = { action: "torrent.remove" }
-    pendingMutationsChanged()
     confirmHash = ""
     confirmName = ""
   }
 
-  function showMutationOutcome(action, hash, status, code) {
-    if (status === "confirmed") {
-      const p = pendingMutations[hash]
-      if (p && p.action === action) {
-        delete pendingMutations[hash]
-        pendingMutationsChanged()
-      }
-      mutError = ""
-      return
-    }
-    if (status === "timeout") {
-      // Ambiguous, not failed: committed state remains the authority.
-      const p2 = pendingMutations[hash]
-      if (p2 && p2.action === action) {
-        delete pendingMutations[hash]
-        pendingMutationsChanged()
-      }
-      mutError = "Action result unknown — state will tell"
-      mutErrorSince = Date.now()
-      return
-    }
-    // Stage-1 rejection codes (deterministic model, docs/IPC.md v1.2).
+  // ---- Terminal effect mapping (banner truthfulness only; overlays
+  //      are settled inside MutationClient).
+  function bannerForCode(code) {
     const messages = {
       stale_torrent: "Torrent no longer exists",
       invalid_url: "Invalid magnet link",
@@ -178,14 +172,41 @@ Panel {
       busy: "Too many actions in flight",
       ref_conflict: "Action conflict — try again"
     }
-    mutError = messages[code] || "Action failed"
-    mutErrorSince = Date.now()
-    // A stage-1 rejection is terminal for this attempt: the daemon will
-    // not perform it, so the pending overlay must go (review finding —
-    // it previously stuck on non-stale codes).
-    if (typeof hash === "string" && hash !== "" && pendingMutations[hash] !== undefined) {
-      delete pendingMutations[hash]
-      pendingMutationsChanged()
+    return messages[code] || "Action failed"
+  }
+
+  function applyTerminalEffect(t) {
+    // Ambiguous, not failed: committed state remains the authority.
+    mutError = t.status === "timeout" ? "Action result unknown — state will tell" : ""
+    if (mutError !== "") mutErrorSince = Date.now()
+  }
+
+  // Watchdog pass: resolve pending mutations whose terminal never
+  // arrived. Same-ref replay query for pause/resume/add (the daemon
+  // answers from its recorded outcome — no backend execution);
+  // torrent.remove is NEVER re-sent: its overlay escalates to the
+  // ambiguity banner and the state stream itself settles the row.
+  function mutationWatchdog() {
+    if (!sock.connected || !helloSent || pendingKind !== "") return
+    const now = Date.now()
+    for (const hash of Object.keys(mutState.pending)) {
+      const e = mutState.pending[hash]
+      if (!e || now - e.since < mutWatchdogMs || e.queried) continue
+      if (e.action === "torrent.remove") {
+        delete mutState.pending[hash]
+        mutError = "Action result unknown — state will tell"
+        mutErrorSince = now
+        mutStateChanged()
+        continue
+      }
+      const extra = e.action === "torrent.add" ? { url: e.url } : { hash: e.hash }
+      if (requestMutation(e.action, extra, e.ref)) {
+        // pending entries are keyed by e.hash in every case; keep the
+        // queried latch so a lost replay answer cannot loop the query.
+        if (mutState.pending[e.hash] !== undefined) mutState.pending[e.hash].queried = true
+        mutStateChanged()
+      }
+      return // one watchdog query at a time (lockstep)
     }
   }
 
@@ -200,8 +221,10 @@ Panel {
     upSpeed = 0
     // Never carry optimistic state across a connection loss: the fresh
     // snapshot after resubscribe is the truth (ADR-0006 client rules).
-    pendingMutations = ({})
-    pendingMutationsChanged()
+    // Early-result buffers die with the connection too — a mutation id
+    // from a previous session must never resolve a new session's state.
+    MC.reset(mutState)
+    mutStateChanged()
     confirmHash = ""
     confirmName = ""
   }
@@ -395,37 +418,51 @@ Panel {
         rebuildView()
         break
       case "mutation.accepted":
-        // Stage 1 (ADR-0006): submitted, NOT success. The overlay stays
-        // until the state-derived result arrives.
+        // Stage 1 (ADR-0006): submitted, NOT success. Responses and
+        // terminal pushes are order-independent (MutationClient): if the
+        // terminal already arrived, it is applied HERE and no pending
+        // overlay is created.
         if (pendingKind !== "mutation" || typeof msg.id !== "number" || msg.id !== pendingId) return
         pendingId = -1
         pendingKind = ""
-        if (msg.action === "torrent.add" && typeof msg.hash === "string") {
-          pendingMutations[msg.hash] = { action: "torrent.add", mutation: msg.mutation }
-          pendingMutationsChanged()
-        } else if (pendingMutHash !== "" && pendingMutations[pendingMutHash] !== undefined &&
-                   pendingMutations[pendingMutHash].action === msg.action) {
-          pendingMutations[pendingMutHash].mutation = msg.mutation
+        {
+          const r = MC.onAccepted(mutState, msg)
+          if (r.handled && r.applied) applyTerminalEffect(r.applied)
+          mutStateChanged()
         }
-        pendingMutHash = ""
         break
       case "mutation.rejected":
         if (pendingKind !== "mutation" || typeof msg.id !== "number" || msg.id !== pendingId) return
         pendingId = -1
         pendingKind = ""
-        showMutationOutcome("torrent.reject", pendingMutHash, "", msg.code)
-        pendingMutHash = ""
+        {
+          const r = MC.onRejected(mutState, msg)
+          if (r.handled) {
+            mutError = bannerForCode(r.code)
+            mutErrorSince = Date.now()
+          }
+          mutStateChanged()
+        }
         break
       case "mutation.result":
         if (typeof msg.id === "number") {
-          // Replay answer to a retried request: also the stage-1 response.
+          // Replay answer (same-ref query or replayed request): the
+          // terminal for the CURRENT request.
           if (pendingKind !== "mutation" || msg.id !== pendingId) return
           pendingId = -1
           pendingKind = ""
-          pendingMutHash = ""
+          const r = MC.onResultResponse(mutState, msg)
+          if (r.handled) applyTerminalEffect(r)
+          mutStateChanged()
+          break
         }
-        if (typeof msg.action === "string" && typeof msg.hash === "string") {
-          showMutationOutcome(msg.action, msg.hash, msg.status, "")
+        // Pushed terminal: applied when its mutation is known, buffered
+        // as an early result otherwise (harmless for foreign/duplicate).
+        if (typeof msg.action === "string" && typeof msg.hash === "string" &&
+            typeof msg.mutation === "number") {
+          const r = MC.onResultPush(mutState, msg)
+          if (r.applied) applyTerminalEffect(r)
+          mutStateChanged()
         }
         break
     }
@@ -606,7 +643,7 @@ Panel {
             height: Style.space(13)
 
             HoverHandler { id: rowHover }
-            readonly property bool mutPending: root.pendingMutations[hash] !== undefined
+            readonly property bool mutPending: root.mutState.pending[hash] !== undefined
             readonly property real rightWidth: Math.max(speedsText.visible ? speedsText.implicitWidth : 0,
                                                         actionsRow.implicitWidth)
 
@@ -634,7 +671,7 @@ Panel {
                   text: {
                     // Pending overlay: cosmetic only, cleared by the
                     // daemon's state-derived result (never optimistic).
-                    const p = root.pendingMutations[hash]
+                    const p = root.mutState.pending[hash]
                     if (p) {
                       if (p.action === "torrent.pause") return "pausing\u2026"
                       if (p.action === "torrent.resume") return "resuming\u2026"
@@ -836,6 +873,9 @@ Panel {
     onTriggered: {
       root.ensureSession()
       if (!root.helloSent) return
+      // Watchdog first: a same-ref replay query (if issued) occupies
+      // the one-in-flight slot and the status poll waits a tick.
+      root.mutationWatchdog()
       if (root.pendingKind !== "") {
         if (Date.now() - root.pendingSince > 6000) {
           root.resetSession()

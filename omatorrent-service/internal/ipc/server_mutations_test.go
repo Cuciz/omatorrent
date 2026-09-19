@@ -18,12 +18,16 @@ type fakeMuts struct {
 	submitted []MutationRequest
 	answer    MutationStage1
 	results   chan MutationResult
+	preSubmit func(f *fakeMuts) // optional: runs inside Submit before answering
 }
 
 func (f *fakeMuts) Submit(r MutationRequest) MutationStage1 {
 	f.mu.Lock()
 	f.submitted = append(f.submitted, r)
 	f.mu.Unlock()
+	if f.preSubmit != nil {
+		f.preSubmit(f)
+	}
 	return f.answer
 }
 
@@ -317,5 +321,46 @@ func TestPreV12TypesRejectMutationFields(t *testing.T) {
 		if got := c.recv(); got != `{"type":"error","protocol":1,"code":"invalid_message"}` {
 			t.Fatalf("frame %s: got %s, want invalid_message", frame, got)
 		}
+	}
+}
+
+// ADR-0006 permits either frame order: a terminal result may be
+// published while the request is still being answered (e.g. the intent
+// was already satisfied in committed state). The server must deliver
+// BOTH frames on the same connection — in either order — and stay
+// healthy. (Client-side order-independence is proven deterministically
+// by the ordering tests in tools/test_quickshell.sh against the real
+// MutationClient.js.)
+func TestResultPublishedDuringSubmitBothFramesDelivered(t *testing.T) {
+	f := newFakeMuts()
+	f.preSubmit = func(f *fakeMuts) {
+		f.results <- MutationResult{Mutation: 12, Action: "torrent.pause", Hash: mutHash, Status: "confirmed"}
+	}
+	_, path := startMutServer(t, &fakeHandler{}, f)
+	c := dial(t, path)
+	c.handshake()
+	c.send(`{"type":"torrent.pause","id":4,"hash":"` + mutHash + `","ref":"r1"}`)
+
+	got := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		switch frame := c.recv(); {
+		case strings.HasPrefix(frame, `{"type":"mutation.accepted"`):
+			got["accepted"] = true
+		case strings.HasPrefix(frame, `{"type":"mutation.result"`):
+			got["result"] = true
+			if !strings.Contains(frame, `"status":"confirmed"`) || strings.Contains(frame, `"id"`) {
+				t.Fatalf("pushed result frame wrong: %s", frame)
+			}
+		default:
+			t.Fatalf("unexpected frame: %s", frame)
+		}
+	}
+	if !got["accepted"] || !got["result"] {
+		t.Fatalf("missing frames: %v", got)
+	}
+	// Connection stays usable afterwards.
+	c.send(`{"type":"health","id":5}`)
+	if got := c.recv(); !strings.HasPrefix(got, `{"type":"health","protocol":1,"id":5`) {
+		t.Fatalf("connection unhealthy after both-order delivery: %s", got)
 	}
 }

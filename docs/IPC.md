@@ -243,9 +243,32 @@ open; no payload echoed):
 `paused`; resume ⇒ present and not `paused`; add ⇒ present; remove ⇒
 absent). `timeout` = window elapsed without confirmation: the outcome is
 AMBIGUOUS and surfaced as such; committed state remains the only
-authority. Results are delivered exactly once per mutation, on every
-connection that has issued at least one mutation request (pure status
-clients such as the bar widget never receive them).
+authority.
+
+**Delivery guarantee (accurate):** terminal results are pushed at most
+once per live delivery subscription, on every connection that has
+issued at least one mutation request (pure status clients such as the
+bar widget never receive them). The daemon's delivery pump may briefly
+resubscribe (bounded delay) — a result published in that gap is NOT
+replayed onto existing connections, so **clients must not depend on
+receiving a push.** Clients resolve pending mutations through the state
+stream itself, and MAY resolve them with a same-ref watchdog: after a
+bounded window, re-send the SAME `ref` with identical parameters — the
+daemon answers from its recorded outcome (no backend execution).
+`torrent.remove` is NEVER automatically re-sent (fresh confirmation
+required); its pending overlay escalates to the ambiguous state and the
+row settles via the snapshot/deltas. A client must never automatically
+retry any mutation with a fresh `ref`.
+
+**Frame order:** either legal order — `mutation.accepted` then
+`mutation.result`, or `mutation.result` then `mutation.accepted` — can
+occur on one connection (a result can be published while the request is
+still being answered). Clients must treat responses and pushes as
+independent, id-keyed/correlation-id-keyed streams; the reference panel
+buffers unknown-id results in a bounded early-result map and applies
+them when the matching acceptance arrives (plugins/local.omatorrent/
+MutationClient.js — covered by deterministic ordering tests in
+tools/test_quickshell.sh).
 
 A REPLAYED ref is answered as the request response in one terminal
 frame: the recorded `mutation.rejected` code, or a `mutation.result`
@@ -313,10 +336,16 @@ through a frame.
   render the offline state, reconnect with bounded backoff, and handshake
   again before further requests.
 - Mutations (v1.2): generate a fresh `ref` per attempt; treat
-  `mutation.accepted` as "submitted", never as success; clear all
-  pending overlays on disconnect and re-derive from the fresh snapshot;
-  never auto-retry `torrent.remove` (fresh user confirmation required);
-  render `timeout` results as ambiguous, not failed.
+  `mutation.accepted` as "submitted", never as success; handle BOTH
+  legal frame orders (a `mutation.result` push may precede its
+  `mutation.accepted`) by correlating terminal pushes with mutation ids
+  and buffering unknown ids in a bounded early-result map; clear all
+  pending/early state on disconnect and re-derive from the fresh
+  snapshot; never auto-retry `torrent.remove` (fresh user confirmation
+  required); render `timeout` results as ambiguous, not failed; do not
+  depend on receiving result pushes — resolve stale pendings with a
+  same-ref watchdog query (recorded outcome, no execution; never a
+  fresh ref).
 - Never send qBittorrent data, credentials, or derived secrets; this
   protocol carries none.
 

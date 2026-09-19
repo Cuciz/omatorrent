@@ -139,6 +139,48 @@ Re-validation after the fix round: gofmt/vet clean; `go test -race
 re-run 10/10 PASS with real count 3 → 3; shell restarted with the fixed
 panel — journal clean, panel re-verified visually.
 
+## External review round (2026-09-19, on PR #6 head f4a935d)
+
+One accepted finding + one documentation-integrity finding:
+
+1. **result-before-accepted client race (FIXED).** ADR-0006 permits a
+   `mutation.result` push to arrive before the matching
+   `mutation.accepted` response. The panel's inline handler correlated
+   by action+hash; for `torrent.add` (no hash until acceptance) the
+   early result was consumed with no pending entry existing, then the
+   late `accepted` CREATED one — a potentially stuck "adding…" overlay.
+   Fix: the correlation moved into a pure presentation-side state
+   machine, `plugins/local.omatorrent/MutationClient.js` — pending
+   entries correlate by daemon mutation id; unknown-id terminal pushes
+   are buffered in a bounded (16, FIFO-evicted) early-result map;
+   `accepted` consumes an existing early result and creates NO overlay;
+   matching is strictly by mutation id (foreign ids never cross-resolve);
+   duplicate/late pushes are harmless; reset clears everything. The
+   panel consumes it; the deterministic ordering tests import the SAME
+   file (real logic, not a copy).
+2. **"exactly once" delivery claim (CORRECTED).** The result pump can
+   briefly resubscribe; a result published in that gap is not replayed.
+   Chosen remedy (reviewer option B): the documented guarantee is now
+   "at most once per live delivery subscription — clients must not
+   depend on pushes", and the reference client self-heals with a
+   same-ref watchdog (12 s): pause/resume/add pendings are re-sent with
+   the SAME ref (daemon replays the recorded outcome, zero backend
+   execution); `torrent.remove` is NEVER automatically re-sent — its
+   overlay escalates to the ambiguity banner and the row settles via
+   the state stream. ADR-0006 + docs/IPC.md updated accordingly.
+
+New tests: deterministic ordering battery in tools/test_quickshell.sh
+(both legal orders × pause/resume/remove/add, the add stuck-overlay
+regression, reset-clears-early-buffer, post-reset stray accepted,
+foreign-id isolation, duplicate push, FIFO bound, watchdog replay
+settlement) driving the real MutationClient.js; Go wire test
+TestResultPublishedDuringSubmitBothFramesDelivered (server delivers
+both frames in either order, connection stays healthy).
+
+Destructive safety unchanged: delete_files required boolean, no
+defaults, one hash, never `all`, ref-replay protection, no automatic
+destructive retry with a fresh ref, committed state as source of truth.
+
 ## Known limitations
 
 - Ref deduplication is per-daemon-process; a daemon restart forgets

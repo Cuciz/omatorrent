@@ -28,6 +28,7 @@ cat > "$DIR/shell.qml" <<'QMLEOF'
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "MUTATIONCLIENT" as MC
 
 ShellRoot {
   id: root
@@ -42,6 +43,7 @@ ShellRoot {
   property int snapshotItems: 0
   property int snapshotEnd: 0
   property bool renameTestDone: false
+  property bool orderingTestDone: false
 
   // ---- v1.2 mutation stages (all against a disposable torrent).
   property string ghostHash: ""   // random 40-hex: never resolvable, no data
@@ -49,6 +51,8 @@ ShellRoot {
   property string mutWait: ""     // waiting for a pushed result action
   property int mutPass: 0
   property int mutTotal: 10
+  property string runId: ""
+  property string addRef: ""
 
   function genHash() {
     var s = ""
@@ -79,7 +83,7 @@ ShellRoot {
     pendingKind = "mutation"
     pendingId = nextId++
     pendingSince = Date.now()
-    const ref = refOverride !== undefined ? refOverride : "smoke-" + mutStage
+    const ref = refOverride !== undefined ? refOverride : "smoke-" + runId + "-" + mutStage
     send(Object.assign({ type: action, id: pendingId, ref: ref }, extra))
     return true
   }
@@ -105,13 +109,14 @@ ShellRoot {
       case 0: // wait for snapshot (handled in snapshot.end)
         return
       case 1: // add disposable magnet -> accepted + confirmed result
-        if (requestMutation("torrent.add", { url: magnet })) mutWait = "torrent.add"
+        addRef = "smoke-" + runId + "-1"
+        if (requestMutation("torrent.add", { url: magnet }, addRef)) mutWait = "torrent.add"
         break
       case 2: // duplicate add -> rejected duplicate
         if (requestMutation("torrent.add", { url: magnet })) mutWait = "!duplicate"
         break
       case 3: // replay the COMPLETED stage-1 ref -> result-with-id confirmed
-        if (requestMutation("torrent.add", { url: magnet }, "smoke-1")) mutWait = "!replay"
+        if (requestMutation("torrent.add", { url: magnet }, addRef)) mutWait = "!replay"
         break
       case 4: // structurally invalid magnet -> rejected invalid_url (no close)
         if (requestMutation("torrent.add", { url: "magnet:?xt=urn:btih:NOTHEX&dn=x" })) mutWait = "!invalid_url"
@@ -137,6 +142,134 @@ ShellRoot {
       default:
         maybeDone()
     }
+  }
+
+  // Deterministic v1.2 frame-ordering tests against the REAL client
+  // state machine (plugins/local.omatorrent/MutationClient.js is
+  // imported above — this exercises the same file the panel uses).
+  // ADR-0006 permits BOTH legal orders: mutation.accepted then
+  // mutation.result, and mutation.result then mutation.accepted.
+  function runOrderingTests() {
+    const H = "0123456789abcdef0123456789abcdef01234567"
+    const errs = []
+    const acts = ["torrent.pause", "torrent.resume", "torrent.remove"]
+
+    // A-order (accepted -> result) for hash actions.
+    for (const act of acts) {
+      const st = MC.newState()
+      MC.begin(st, 1, act, H, "", act === "torrent.remove", "r1", 1000)
+      if (st.pending[H] === undefined) errs.push(act + " A: no overlay at begin")
+      let r = MC.onAccepted(st, { id: 1, mutation: 7, action: act, hash: H })
+      if (!r.handled || r.applied !== null) errs.push(act + " A: accepted must register")
+      r = MC.onResultPush(st, { mutation: 7, action: act, hash: H, status: "confirmed" })
+      if (!r.applied || st.pending[H] !== undefined) errs.push(act + " A: push not applied")
+    }
+
+    // B-order (result -> accepted) for hash actions: the push is
+    // buffered, the overlay survives until accepted applies the early
+    // result — never recreated afterwards.
+    for (const act of acts) {
+      const st = MC.newState()
+      MC.begin(st, 1, act, H, "", false, "r1", 1000)
+      let r = MC.onResultPush(st, { mutation: 7, action: act, hash: H, status: "confirmed" })
+      if (r.applied) errs.push(act + " B: push applied before correlation")
+      if (st.pending[H] === undefined) errs.push(act + " B: overlay vanished early")
+      r = MC.onAccepted(st, { id: 1, mutation: 7, action: act, hash: H })
+      if (!r.handled || !r.applied) errs.push(act + " B: early result not applied")
+      if (st.pending[H] !== undefined) errs.push(act + " B: overlay recreated by accepted")
+    }
+
+    // A-order add.
+    {
+      const st = MC.newState()
+      const url = "magnet:?xt=urn:btih:" + H
+      MC.begin(st, 1, "torrent.add", "", url, false, "r1", 1000)
+      if (st.pending[H] !== undefined) errs.push("add A: overlay before accepted")
+      let r = MC.onAccepted(st, { id: 1, mutation: 9, action: "torrent.add", hash: H })
+      if (!r.handled || r.applied !== null) errs.push("add A: accepted must register")
+      if (st.pending[H] === undefined || st.pending[H].mutation !== 9) errs.push("add A: not registered")
+      r = MC.onResultPush(st, { mutation: 9, action: "torrent.add", hash: H, status: "confirmed" })
+      if (!r.applied || st.pending[H] !== undefined) errs.push("add A: push not applied")
+    }
+
+    // B-order add — THE external-review case: result before accepted
+    // must never leave a stale pending overlay.
+    {
+      const st = MC.newState()
+      const url = "magnet:?xt=urn:btih:" + H
+      MC.begin(st, 1, "torrent.add", "", url, false, "r1", 1000)
+      let r = MC.onResultPush(st, { mutation: 9, action: "torrent.add", hash: H, status: "confirmed" })
+      if (r.applied) errs.push("add B: push applied without correlation")
+      if (st.pending[H] !== undefined) errs.push("add B: overlay created by push")
+      r = MC.onAccepted(st, { id: 1, mutation: 9, action: "torrent.add", hash: H })
+      if (!r.handled || !r.applied) errs.push("add B: early result not applied at accepted")
+      if (st.pending[H] !== undefined) errs.push("add B: STUCK OVERLAY after accepted")
+      if (st.early[9] !== undefined) errs.push("add B: early entry not consumed")
+    }
+
+    // Disconnect/reset clears everything; a post-reset accepted is a
+    // stray and must create no state.
+    {
+      const st = MC.newState()
+      MC.begin(st, 1, "torrent.add", "", "magnet:?xt=urn:btih:" + H, false, "r1", 1000)
+      MC.onResultPush(st, { mutation: 9, action: "torrent.add", hash: H, status: "confirmed" })
+      MC.reset(st)
+      if (Object.keys(st.pending).length || Object.keys(st.early).length || st.inflight !== null)
+        errs.push("reset did not clear state")
+      const r = MC.onAccepted(st, { id: 1, mutation: 9, action: "torrent.add", hash: H })
+      if (r.handled || st.pending[H] !== undefined) errs.push("post-reset accepted created state")
+    }
+
+    // Unrelated mutation ids never cross-resolve.
+    {
+      const st = MC.newState()
+      MC.begin(st, 1, "torrent.pause", H, "", false, "r1", 1000)
+      MC.onAccepted(st, { id: 1, mutation: 7, action: "torrent.pause", hash: H })
+      const r = MC.onResultPush(st, { mutation: 99, action: "torrent.pause", hash: H, status: "confirmed" })
+      if (r.applied || st.pending[H] === undefined) errs.push("foreign id cross-resolved")
+      const r2 = MC.onResultPush(st, { mutation: 7, action: "torrent.pause", hash: H, status: "confirmed" })
+      if (!r2.applied || st.pending[H] !== undefined) errs.push("own id not applied")
+    }
+
+    // Duplicate/late result is harmless.
+    {
+      const st = MC.newState()
+      MC.begin(st, 1, "torrent.pause", H, "", false, "r1", 1000)
+      MC.onAccepted(st, { id: 1, mutation: 7, action: "torrent.pause", hash: H })
+      MC.onResultPush(st, { mutation: 7, action: "torrent.pause", hash: H, status: "confirmed" })
+      const r = MC.onResultPush(st, { mutation: 7, action: "torrent.pause", hash: H, status: "confirmed" })
+      if (r.applied) errs.push("duplicate push applied twice")
+      if (st.pending[H] !== undefined) errs.push("duplicate push recreated overlay")
+    }
+
+    // Early-result buffer is bounded (FIFO eviction).
+    {
+      const st = MC.newState()
+      for (let i = 1; i <= 20; i++)
+        MC.onResultPush(st, { mutation: i, action: "torrent.add", hash: "h" + i, status: "confirmed" })
+      const n = Object.keys(st.early).length
+      if (n > 16) errs.push("early buffer unbounded: " + n)
+      if (st.early[1] !== undefined || st.early[4] !== undefined) errs.push("FIFO eviction broken")
+      if (st.early[20] === undefined) errs.push("newest early entry lost")
+    }
+
+    // A same-ref watchdog query settles via the replay response.
+    {
+      const st = MC.newState()
+      MC.begin(st, 1, "torrent.pause", H, "", false, "r1", 1000)
+      MC.onAccepted(st, { id: 1, mutation: 7, action: "torrent.pause", hash: H })
+      MC.begin(st, 2, "torrent.pause", H, "", false, "r1", 2000)
+      const r = MC.onResultResponse(st, { id: 2, mutation: 7, action: "torrent.pause", hash: H, status: "confirmed" })
+      if (!r.handled || !r.applied || st.pending[H] !== undefined || st.inflight !== null)
+        errs.push("replay response did not settle the query")
+    }
+
+    if (errs.length) {
+      print("OTQS-FAIL ordering: " + errs.join("; "))
+      return
+    }
+    print("OTQS-ORDERING-OK")
+    orderingTestDone = true
   }
 
   // Deterministic rename-ordering check mirroring the panel's source
@@ -207,6 +340,7 @@ ShellRoot {
       case "torrent.snapshot.end":
         snapshotEnd++
         print("OTQS-SNAPSHOT items=" + snapshotItems)
+        if (runId === "") runId = String(Date.now())
         ghostHash = genHash()
         mutStage = 1
         mutStep()
@@ -263,7 +397,7 @@ ShellRoot {
   }
 
   function maybeDone() {
-    if (matched >= 2 && snapshotBegin === 1 && snapshotEnd === 1 && renameTestDone && mutPass >= mutTotal) {
+    if (matched >= 2 && snapshotBegin === 1 && snapshotEnd === 1 && renameTestDone && orderingTestDone && mutPass >= mutTotal) {
       print("OTQS-DONE")
       Qt.quit()
     }
@@ -286,6 +420,7 @@ ShellRoot {
     repeat: true
     onTriggered: {
       if (!root.renameTestDone) root.runRenameModelTest()
+      if (!root.orderingTestDone) root.runOrderingTests()
       root.mutStep()
       root.maybeDone()
       if (!root.helloSent && sock.connected) {
@@ -303,7 +438,8 @@ ShellRoot {
   Timer { interval: 90000; running: true; onTriggered: { print("OTQS-FAIL hard timeout (stage " + mutStage + " wait " + mutWait + ")"); Qt.quit() } } // hard timeout
 }
 QMLEOF
-sed -i "s|SOCKPATH|${SOCK}|g" "$DIR/shell.qml"
+MJS="$(cd "$(dirname "$0")/.." && pwd)/plugins/local.omatorrent/MutationClient.js"
+sed -i "s|SOCKPATH|${SOCK}|g; s|MUTATIONCLIENT|${MJS}|g" "$DIR/shell.qml"
 
 echo "== isolated quickshell IPC smoke against $SOCK =="
 timeout 100 qs -p "$DIR" 2>&1 | grep -E "OTQS-" | tee "$DIR/out.log" >&2
@@ -312,13 +448,14 @@ status=$(grep -c 'OTQS-READ: {"type":"system.status"' "$DIR/out.log" || true)
 subd=$(grep -c 'OTQS-SUBSCRIBED' "$DIR/out.log" || true)
 snap=$(grep -c 'OTQS-SNAPSHOT' "$DIR/out.log" || true)
 rename=$(grep -c 'OTQS-RENAME-OK' "$DIR/out.log" || true)
+ordering=$(grep -c 'OTQS-ORDERING-OK' "$DIR/out.log" || true)
 mut=$(grep -c 'OTQS-MUT stage' "$DIR/out.log" || true)
 fail=$(grep -c 'OTQS-FAIL' "$DIR/out.log" || true)
 doneMarker=$(grep -c 'OTQS-DONE' "$DIR/out.log" || true)
 
-echo "matched-status=$status subscribed=$subd snapshots=$snap rename-model=$rename mutation-stages=$mut/10 failures=$fail"
-if [ "$fail" -eq 0 ] && [ "$doneMarker" -ge 1 ] && [ "$subd" -ge 1 ] && [ "$rename" -ge 1 ] && [ "$mut" -ge 10 ]; then
-  echo "PASS: one-in-flight discipline + v1.1 snapshot + rename model + v1.2 mutation lifecycle (disposable torrent, both delete_files paths, duplicate/replay/invalid/stale rejections)"
+echo "matched-status=$status subscribed=$subd snapshots=$snap rename-model=$rename ordering=$ordering mutation-stages=$mut/10 failures=$fail"
+if [ "$fail" -eq 0 ] && [ "$doneMarker" -ge 1 ] && [ "$subd" -ge 1 ] && [ "$rename" -ge 1 ] && [ "$ordering" -ge 1 ] && [ "$mut" -ge 10 ]; then
+  echo "PASS: one-in-flight discipline + v1.1 snapshot + rename model + v1.2 mutation lifecycle (disposable torrent, both delete_files paths, duplicate/replay/invalid/stale rejections) + deterministic frame-ordering tests (both legal orders, all actions)"
   exit 0
 fi
 echo "FAIL: expected OTQS-DONE with subscribed + rename-model + 10 mutation stages and no OTQS-FAIL"
