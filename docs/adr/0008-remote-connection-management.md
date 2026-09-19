@@ -260,8 +260,12 @@ list extended.
   superseded profile; (5) the mutation itself with
   `secretMutated`/`storeMutated` tracking — rollback restores ONLY
   what actually mutated (a failed Store/Delete is treated as atomic);
-  (6) syncer switch, mutator `CommitSwap` (clears the drain), Manager
-  state/epoch update, best-effort old-client logout. Concurrent
+  (6) activation — ALL under the drain, with the drain release as the
+  transaction's literal last step: syncer switch, Manager
+  state/epoch/client commit under `m.mu`, mutator `CommitSwap` (which
+  releases the drain), then the best-effort old-client logout. A
+  preempted winner therefore cannot resume after a newer transaction
+  committed and overwrite in-memory state with stale values. Concurrent
   Configures serialize on the drain: the loser is refused
   (`mutations_pending`) and observationally inert (no snapshot, no
   provider call, no store/epoch change). A committed activation can

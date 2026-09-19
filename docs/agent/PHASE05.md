@@ -297,9 +297,10 @@ while T1 runs a full Configure. No sleeps, no scheduler luck.
   final test uses a test-only post-persistence build-failure hook so
   the rollback really executes.)
 - Result on the fixed code: **PASS** — T1 is refused
-  (`mutations_pending`) and observationally inert (no profile snapshot
-  via the `readStoreRawFn` spy, zero provider calls, no store/epoch/
-  profile change); T2 then fails after its mutation point and restores
+  (`mutations_pending`) and observationally inert (store byte-identical,
+  zero provider calls, no epoch/profile change; the `readStoreRawFn`
+  snapshot spy is asserted separately by the strengthened
+  `TestConfigureExclusiveUnderDrain`); T2 then fails after its mutation point and restores
   its OWN snapshot; final state is A in runtime, on disk, in the
   secret pairing and after restart. The suite was looped 10× under
   `-race` (green) after making the test harness deterministically wait
@@ -327,8 +328,13 @@ while T1 runs a full Configure. No sleeps, no scheduler luck.
 6. Build `next` profile; apply the secret action (`secretMutated`).
 7. `SaveStore(next)` (`storeMutated`).
 8. Build-failure hook (test-only) + client build.
-9. Syncer switch → `CommitSwap` → `drainHeld = false` → Manager
-   state/epoch update → best-effort old-client logout.
+9. Activation entirely under the drain: syncer switch → Manager
+   state/epoch/client commit → `CommitSwap` (releases the drain) →
+   `drainHeld = false` → best-effort old-client logout. (End-of-
+   transaction ordering tightened after the final architecture
+   re-review: the Manager's in-memory state is committed BEFORE the
+   drain releases, so a preempted winner can never overwrite a newer
+   committed transaction's state.)
 
 Rollback runs only for what actually mutated (`secretMutated` /
 `storeMutated`): a failed Store/Delete is treated as atomic (nothing

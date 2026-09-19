@@ -707,12 +707,16 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 		return fail(RejectInvalidURL)
 	}
 
-	// Atomic activation: syncer first (its state immediately degrades —
-	// any straddling submission validates against degraded state and is
-	// refused), then the mutator swap commits and releases the drain.
+	// Atomic activation, all UNDER the drain (architecture re-review
+	// F1: the drain must be the transaction's LAST step — releasing it
+	// before the Manager's in-memory state is committed would let a
+	// preempted winner resume after a newer transaction fully committed
+	// and overwrite profile/endpoint/epoch with stale values):
+	// syncer first (its state immediately degrades — any straddling
+	// submission validates against degraded state and is refused), then
+	// the Manager state/epoch commit, then the mutator swap — whose
+	// CommitSwap IS the drain release.
 	m.syncer.SwitchBackend(client)
-	m.mutator.CommitSwap(client)
-	drainHeld = false
 
 	m.mu.Lock()
 	oldClient := m.current
@@ -727,6 +731,9 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	}
 	epoch := m.epoch
 	m.mu.Unlock()
+
+	m.mutator.CommitSwap(client)
+	drainHeld = false
 
 	// Best-effort logout on the superseded backend (ADR-0008 §6):
 	// expires the old session server-side; no credentials in the
