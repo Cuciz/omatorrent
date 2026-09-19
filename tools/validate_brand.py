@@ -62,10 +62,10 @@ check("SproutGlyph.qml copies identical", a == b)
 
 # ---- 2. Asset inventory ----------------------------------------------
 PNG_DIMS = {  # name: (width, height, kind) kind: "t"=transparent, "d"=dark base
-    "sprout-glyph-16.png": (16, 12, "t"),
-    "sprout-glyph-24.png": (24, 18, "t"),
-    "sprout-glyph-32.png": (32, 24, "t"),
-    "sprout-glyph-48.png": (48, 36, "t"),
+    "sprout-glyph-12.png": (12, 10, "t"),
+    "sprout-glyph-24.png": (24, 20, "t"),
+    "sprout-glyph-36.png": (36, 30, "t"),
+    "sprout-glyph-48.png": (48, 40, "t"),
     "sprout-glyph-mono-64.png": (64, 48, "t"),
     "sprout-lockup-transparent.png": (752, 144, "t"),
     "sprout-glyph-dark-64.png": (64, 48, "d"),

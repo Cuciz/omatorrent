@@ -201,10 +201,10 @@ def main():
     write_svg("sprout-glyph-mono.svg", 24 * U, 18 * U,
               svg_rects(GLYPH_FULL, U, LIGHT),
               "full sprout glyph, monochrome light foreground")
-    write_svg("sprout-glyph-compact.svg", 12 * U, 9 * U,
+    write_svg("sprout-glyph-compact.svg", 12 * U, 10 * U,
               svg_rects(GLYPH_COMPACT, U, GREEN),
               "compact sprout glyph (12x10 grid) for 16-32 px surfaces")
-    write_svg("sprout-glyph-compact-mono.svg", 12 * U, 9 * U,
+    write_svg("sprout-glyph-compact-mono.svg", 12 * U, 10 * U,
               svg_rects(GLYPH_COMPACT, U, LIGHT),
               "compact sprout glyph, monochrome light foreground")
 
@@ -253,10 +253,10 @@ def main():
 
     # --- PNG raster exports (integer multiples only) ---
     # Transparent variants (true alpha): small-size glyph exports.
-    export_png("sprout-glyph-compact.svg", "sprout-glyph-16.png", 16, 12)
-    export_png("sprout-glyph-compact.svg", "sprout-glyph-24.png", 24, 18)
-    export_png("sprout-glyph-compact.svg", "sprout-glyph-32.png", 32, 24)
-    export_png("sprout-glyph-compact.svg", "sprout-glyph-48.png", 48, 36)
+    export_png("sprout-glyph-compact.svg", "sprout-glyph-12.png", 12, 10)
+    export_png("sprout-glyph-compact.svg", "sprout-glyph-24.png", 24, 20)
+    export_png("sprout-glyph-compact.svg", "sprout-glyph-36.png", 36, 30)
+    export_png("sprout-glyph-compact.svg", "sprout-glyph-48.png", 48, 40)
     export_png("sprout-glyph-mono.svg", "sprout-glyph-mono-64.png", 64, 48)
     export_png("sprout-lockup.svg", "sprout-lockup-transparent.png", 752, 144)
     # Dark-base variants (documentation surfaces): flattened on #141415.
