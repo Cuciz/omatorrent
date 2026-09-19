@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -452,5 +453,69 @@ func TestLoopbackClassificationFailsClosed(t *testing.T) {
 		if ep, err := ValidateURL("http://" + host + ":8080"); err != nil || !ep.IsLoopback {
 			t.Errorf("host %q lost its loopback classification", host)
 		}
+	}
+}
+
+// Architecture re-review F1: Configure takes exclusivity BEFORE its
+// rollback snapshots. While a drain is open, a Configure is refused
+// (mutations_pending) with NOTHING changed — a second transaction can
+// never snapshot a state that predates another transaction's commit.
+func TestConfigureExclusiveUnderDrain(t *testing.T) {
+	fx := &qbFixture{torrents: 1, appVersion: "v5.2.3", apiVersion: "2.15.1"}
+	ts := httptest.NewServer(fx.handler())
+	defer ts.Close()
+	h := newHarness(t, localProfile(ts.URL), func() (*qbittorrent.Client, error) {
+		return qbittorrent.New(ts.URL, "", "")
+	})
+	// Simulate another transaction mid-drain.
+	if err := h.mutator.BeginSwitch(); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _ := ReadStoreRaw(h.store)
+	cfg := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+		URL: ts.URL, Username: "u", Password: []byte("x"), TLSMode: TLSSystem}, SecretAction: "replace"})
+	if cfg.OK || cfg.Rejection != RejectMutationsPending {
+		t.Fatalf("configure under drain = %+v, want mutations_pending", cfg)
+	}
+	after, _, _ := ReadStoreRaw(h.store)
+	if string(before) != string(after) {
+		t.Fatal("store modified by a refused (drained) configure")
+	}
+	h.mutator.AbortSwitch()
+}
+
+// Overlapping Configure transactions serialize: whatever interleaving
+// the race scheduler picks, the runtime profile always equals a
+// COMMITTED profile and the persisted store always loads cleanly.
+func TestConcurrentConfiguresSerialize(t *testing.T) {
+	fixtures := make([]*qbFixture, 4)
+	servers := make([]*httptest.Server, 4)
+	urls := make([]string, 4)
+	for i := range servers {
+		fixtures[i] = &qbFixture{torrents: 1, appVersion: "v5.2.3", apiVersion: "2.15.1"}
+		servers[i] = httptest.NewServer(fixtures[i].handler())
+		urls[i] = servers[i].URL
+		defer servers[i].Close()
+	}
+	h := newHarness(t, localProfile(urls[0]), func() (*qbittorrent.Client, error) {
+		return qbittorrent.New(urls[0], "", "")
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+				URL: urls[n%len(urls)], TLSMode: TLSSystem}, SecretAction: "keep"})
+		}(i)
+	}
+	wg.Wait()
+	// Invariant: runtime == some committed profile == loadable store.
+	persisted, exists, err := LoadStore(h.store)
+	if err != nil || !exists {
+		t.Fatalf("store unreadable after concurrent configures: exists=%v err=%v", exists, err)
+	}
+	if cur := h.mgr.Profile(); cur.URL != persisted.URL {
+		t.Fatalf("runtime (%s) diverged from the persisted commit (%s)", cur.URL, persisted.URL)
 	}
 }

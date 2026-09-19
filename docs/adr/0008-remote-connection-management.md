@@ -79,6 +79,16 @@ prefix model: requests go to `{base}/api/v2/…`; the proxy strips the
 prefix — pinned by tests). Loopback classification for policy:
 literal `127.0.0.1`, `::1`, and the hostname `localhost`
 (`/etc/hosts` trust documented as a same-UID-boundary residual).
+- **Path canonicalization** (external review round 2, blocker 4): base
+  paths reject ANY percent-encoding (`%2f`, `%5c`, `%2e`, `%252e`,
+  `%u…`, truncated escapes — attack-matrix tested). A reverse proxy
+  may decode or normalize paths before routing, so an accepted prefix
+  must remain the same canonical prefix under ordinary decoding;
+  rejecting every encoding outright is deliberately stricter than
+  necessary rather than trying to out-clever decoders. Alternative IP
+  spellings (decimal/hex/octal/short forms, zoned IPv6, dotted
+  localhost) likewise never earn the loopback exemption — ambiguity
+  always fails toward the remote (strict) class.
 
 ### 3. HTTP/HTTPS policy
 
@@ -88,6 +98,19 @@ literal `127.0.0.1`, `::1`, and the hostname `localhost`
   `allow_insecure_http` acknowledgement; activation and test refuse
   with status `insecure_http` otherwise, and the UI must render the
   acknowledged state as INSECURE. HTTPS is the default remote mode.
+- **Startup equivalence** (external review round 2, blocker 1): the
+  policy predicate lives in ONE place (`httpPolicyError`, called from
+  `Profile.Validate`) that EVERY activation path runs — persisted
+  profile load, the service.json fallback, daemon-side saves and
+  client builds, plus `connection.test`/`connection.configure` — so a
+  hand-edited or stale `connection.json` carrying remote HTTP without
+  the acknowledgement fails closed at daemon start exactly as
+  configure would refuse it.
+- **Factual reporting**: `connection.status`'s `insecure` field is the
+  FACTUAL transport state (`non-loopback && http`, via
+  `Endpoint.InsecureTransport`), never a function of consent —
+  `allow_insecure_http` is permission, `insecure` is reality, and
+  "remote HTTP in use + insecure=false" is unreachable.
 
 ### 4. TLS policy (fail-closed, no disable switch)
 

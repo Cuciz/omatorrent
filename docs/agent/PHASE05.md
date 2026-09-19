@@ -226,6 +226,47 @@ smoke re-run green:
    the same canonical prefix under any ordinary decoding). Tests:
    17-case attack matrix + plain-prefix acceptance.
 
+### Re-reviews after the round-2 fixes (focused on the actual diff)
+
+- Security re-review (adversarial, executed the named tests plus its
+  own out-of-tree probes of ValidateURL/normalizePath): **PASS** — no
+  bypass found in any probe area: policy equivalence (A), factual
+  insecure (B), rollback correctness (C), secret handling (D), path
+  canonicalization (E — probed beyond the committed matrix incl. raw
+  control bytes, `/./`, trailing `/..`, malformed escapes), round-1
+  guarantees (F — none weakened). Alternative loopback spellings
+  verified to fail toward the strict class; four INFO notes, none
+  requiring change.
+- QA re-review (independent reproduction): **PASS 9/9** — full race
+  suite, all seven blocker regressions, live daemon v1.4 status
+  (factual insecure), wire encoder tests, full smoke (10/10 + 4/4,
+  OTQS-DONE), plugin validation with negative control, harness 82/82,
+  guard 39/39, journal secret grep 0 over a non-empty window, git
+  hygiene, and confirmation that round 2 touched no QML (visual
+  re-validation correctly not repeated).
+- Architecture re-review: **PASS-WITH-FINDINGS** — all seven requested
+  points verified; F1 MEDIUM (concurrent Configure transactions could
+  snapshot before exclusivity, resurrecting the stale-rollback class
+  through concurrency) + five doc/hygiene findings. ALL FIXED:
+  - F1: Configure now takes the mutator drain BEFORE its rollback
+    snapshots (a concurrent Configure gets mutations_pending or runs
+    strictly after the commit; snapshots are always current). Pinned
+    by `TestConfigureExclusiveUnderDrain` (refused with zero changes)
+    and `TestConcurrentConfiguresSerialize` (16 overlapping
+    transactions; runtime always equals the persisted commit), run
+    under -race.
+  - F2: ADR-0008 §2/§3 amended (path canonicalization bullet incl.
+    fail-closed loopback spelling; startup-equivalence and
+    factual-reporting bullets).
+  - F3: the HTTP-policy predicate is ONE function (`httpPolicyError`)
+    shared by Profile.Validate, connection.test and
+    connection.configure.
+  - F4: IPC.md corrected — `connection.status` always carries `detail`
+    (only the test response omits it when empty).
+  - F5: `openProfileForRead` is the single shared read path for
+    LoadStore and ReadStoreRaw (no check drift).
+  - F6: dead assignment removed.
+
 ## Known limitations
 
 - `connection.test`/`connection.configure` carry the password once per

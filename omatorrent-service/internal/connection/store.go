@@ -38,44 +38,9 @@ func DefaultStorePath() (string, error) {
 // unreadable, permissive, symlinked, oversized, malformed or semantically
 // invalid IS an error — the daemon fails closed, it never repairs.
 func LoadStore(path string) (Profile, bool, error) {
-	// Refuse symlinked path components above the profile too (the
-	// write side refuses them via ensurePrivateDir; the read side must
-	// not silently follow a redirected directory — security review F7).
-	if err := refuseSymlinkedDir(filepath.Dir(path)); err != nil {
-		return Profile{}, true, err
-	}
-
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Profile{}, false, nil
-		}
-		if errors.Is(err, syscall.ELOOP) {
-			return Profile{}, true, fmt.Errorf("connection: refusing symlinked profile %s", path)
-		}
-		return Profile{}, true, fmt.Errorf("connection: open %s: %w", path, err)
-	}
-	defer f.Close()
-
-	// Stat the handle so the permission check and the read see the
-	// same file.
-	info, err := f.Stat()
-	if err != nil {
-		return Profile{}, true, fmt.Errorf("connection: stat %s: %w", path, err)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return Profile{}, true, fmt.Errorf("connection: %s must not be group/world accessible (mode %04o)", path, info.Mode().Perm())
-	}
-	if !info.Mode().IsRegular() {
-		return Profile{}, true, fmt.Errorf("connection: %s is not a regular file", path)
-	}
-
-	data, err := io.ReadAll(io.LimitReader(f, MaxProfileBytes+1))
-	if err != nil {
-		return Profile{}, true, fmt.Errorf("connection: read %s: %w", path, err)
-	}
-	if len(data) > MaxProfileBytes {
-		return Profile{}, true, fmt.Errorf("connection: %s exceeds %d bytes", path, MaxProfileBytes)
+	data, exists, err := openProfileForRead(path)
+	if err != nil || !exists {
+		return Profile{}, exists, err
 	}
 
 	var p Profile
@@ -94,12 +59,21 @@ func LoadStore(path string) (Profile, bool, error) {
 }
 
 // ReadStoreRaw returns the raw persisted bytes (same safety checks as
-// LoadStore: O_NOFOLLOW, permissive/refusing stat, bounded size) so a
-// Configure transaction can restore the EXACT pre-transaction
-// persisted state on failure (external review round 2, blocker 2).
-// exists=false only for a missing file; anything unreadable is an
-// error — never silently treated as absent.
-func ReadStoreRaw(path string) (data []byte, exists bool, err error) {
+// LoadStore via the shared open helper) so a Configure transaction can
+// restore the EXACT pre-transaction persisted state on failure
+// (external review round 2, blocker 2). exists=false only for a
+// missing file; anything unreadable is an error — never silently
+// treated as absent.
+func ReadStoreRaw(path string) ([]byte, bool, error) {
+	return openProfileForRead(path)
+}
+
+// openProfileForRead is the ONE read path for the profile file
+// (architecture re-review F5: LoadStore and ReadStoreRaw share it, so
+// their safety checks cannot drift): symlinked directory components
+// refused, O_NOFOLLOW open, fstat permission/regular checks on the
+// handle, bounded size.
+func openProfileForRead(path string) (data []byte, exists bool, err error) {
 	if err := refuseSymlinkedDir(filepath.Dir(path)); err != nil {
 		return nil, true, err
 	}
@@ -114,6 +88,7 @@ func ReadStoreRaw(path string) (data []byte, exists bool, err error) {
 		return nil, true, fmt.Errorf("connection: open %s: %w", path, err)
 	}
 	defer f.Close()
+
 	info, err := f.Stat()
 	if err != nil {
 		return nil, true, fmt.Errorf("connection: stat %s: %w", path, err)

@@ -388,7 +388,9 @@ Response (exact key set):
 ```
 (`pin` — 64 hex — is additionally present iff `tls_mode` is `pin`;
 `epoch` starts at 0 on daemon start and increments on every
-configured switch; `detail` is omitted when empty.)
+configured switch. `connection.status` always carries `detail`
+(possibly empty); the `connection.test` response omits `detail` when
+empty.)
 - `mode` — `local` (loopback URL) or `remote` (derived, never stored);
   `url` — the validated origin (non-secret; the settings form prefills
   it — like `username`, status surfaces display only `host`).

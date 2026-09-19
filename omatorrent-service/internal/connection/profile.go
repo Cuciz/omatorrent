@@ -242,10 +242,21 @@ func (p Profile) Validate() (Endpoint, error) {
 	if err != nil {
 		return Endpoint{}, err
 	}
-	if !ep.IsLoopback && ep.Scheme == "http" && !p.AllowInsecureHTTP {
-		return Endpoint{}, fmt.Errorf("plain HTTP to a non-loopback host requires the explicit allow_insecure_http acknowledgement")
+	if err := httpPolicyError(ep, p.AllowInsecureHTTP); err != nil {
+		return Endpoint{}, err
 	}
 	return ep, nil
+}
+
+// httpPolicyError is THE insecure-HTTP policy predicate, shared by
+// every activation path (Profile.Validate, connection.test,
+// connection.configure) so the rule can never diverge between them
+// (architecture re-review F3).
+func httpPolicyError(ep Endpoint, acknowledged bool) error {
+	if ep.InsecureTransport() && !acknowledged {
+		return fmt.Errorf("plain HTTP to a non-loopback host requires the explicit allow_insecure_http acknowledgement")
+	}
+	return nil
 }
 
 // InsecureTransport reports the FACTUAL transport state: non-loopback

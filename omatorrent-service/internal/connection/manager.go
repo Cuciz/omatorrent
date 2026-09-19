@@ -315,7 +315,7 @@ func (m *Manager) Test(ctx context.Context, p TestParams) TestResult {
 	if err != nil {
 		return TestResult{Status: StatusInvalidConfig, Detail: err.Error()}
 	}
-	if !ep.IsLoopback && ep.Scheme == "http" && !p.AllowInsecureHTTP {
+	if err := httpPolicyError(ep, p.AllowInsecureHTTP); err != nil {
 		return TestResult{Status: StatusInsecureHTTP, Host: truncateRunes(ep.Host, 128), Transport: ep.Scheme,
 			Detail: "plain HTTP to a non-loopback host requires explicit acknowledgement"}
 	}
@@ -526,7 +526,7 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	if err != nil {
 		return ConfigureResult{Rejection: RejectInvalidURL}
 	}
-	if !ep.IsLoopback && ep.Scheme == "http" && !p.AllowInsecureHTTP {
+	if err := httpPolicyError(ep, p.AllowInsecureHTTP); err != nil {
 		return ConfigureResult{Rejection: RejectInsecureHTTP}
 	}
 	switch p.SecretAction {
