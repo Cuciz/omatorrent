@@ -432,3 +432,25 @@ func TestValidateURLEncodedPathAttacks(t *testing.T) {
 		}
 	}
 }
+
+// Alternative loopback spellings (decimal/hex/octal/short IP forms,
+// zoned IPv6, dotted localhost) must classify as REMOTE — the strict
+// class. Go's resolver may dial some of them as 127.0.0.1, so the
+// exemption is reserved for the literal forms only; ambiguity always
+// fails toward remote (HTTPS/acknowledgement required).
+func TestLoopbackClassificationFailsClosed(t *testing.T) {
+	for _, host := range []string{"2130706433", "0x7f.1", "127.1", "0177.0.0.1", "[::1%25eth0]", "LOCALHOST.", "localhost.example"} {
+		ep, err := ValidateURL("http://" + host + ":8080")
+		if err != nil {
+			continue // rejected outright is even stricter
+		}
+		if ep.IsLoopback {
+			t.Errorf("host %q classified loopback — must fail toward remote", host)
+		}
+	}
+	for _, host := range []string{"127.0.0.1", "[::1]", "localhost"} {
+		if ep, err := ValidateURL("http://" + host + ":8080"); err != nil || !ep.IsLoopback {
+			t.Errorf("host %q lost its loopback classification", host)
+		}
+	}
+}
