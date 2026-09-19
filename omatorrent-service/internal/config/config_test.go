@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,7 +29,7 @@ func TestDefaultsWhenNoFile(t *testing.T) {
 func TestLoadFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "service.json")
-	body := `{"qbittorrent":{"url":"http://127.0.0.1:9999","username":"u","password":"p"},"ipc":{"socket_path":"/tmp/x.sock"}}`
+	body := `{"qbittorrent":{"url":"http://127.0.0.1:9999","username":"u"},"ipc":{"socket_path":"/tmp/x.sock"}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -36,11 +37,30 @@ func TestLoadFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.QBittorrent.URL != "http://127.0.0.1:9999" || cfg.QBittorrent.Username != "u" || cfg.QBittorrent.Password != "p" {
+	if cfg.QBittorrent.URL != "http://127.0.0.1:9999" || cfg.QBittorrent.Username != "u" {
 		t.Fatalf("cfg = %+v", cfg)
+	}
+	if cfg.QBittorrent.Password != "" {
+		t.Fatal("password field must never populate the config")
 	}
 	if cfg.IPC.SocketPath != "/tmp/x.sock" {
 		t.Fatalf("socket = %q", cfg.IPC.SocketPath)
+	}
+}
+
+// Phase 0.5 (ADR-0009): a config still carrying a plaintext password
+// fails load with an explicit migration error — fail closed, never a
+// silent acceptance.
+func TestRejectsLegacyPassword(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "service.json")
+	body := `{"qbittorrent":{"url":"http://127.0.0.1:9999","username":"u","password":"p"}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "password") {
+		t.Fatalf("err = %v, want migration error naming the password field", err)
 	}
 }
 

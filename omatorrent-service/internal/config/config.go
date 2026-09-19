@@ -1,11 +1,12 @@
 // Package config loads omatorrent-service configuration.
 //
-// Phase 0 shape: a single JSON file holding the qBittorrent endpoint and
-// optional credentials, plus an optional IPC socket path override. The file
-// must not be group/world readable when it exists (fail closed). A real
-// secret provider (systemd LoadCredential / libsecret) is future work; the
-// restricted-permission file is the Phase 0 credential source and secrets
-// from it are never logged.
+// A single JSON file holding the static service configuration: the
+// fallback qBittorrent endpoint (no credentials — passwords are
+// rejected since Phase 0.5, ADR-0009) and an optional IPC socket path
+// override. The file must not be group/world readable when it exists
+// (fail closed). The runtime connection profile (remote backends,
+// TLS policy) lives in the daemon-owned connection store
+// (internal/connection).
 package config
 
 import (
@@ -18,13 +19,20 @@ import (
 	"syscall"
 )
 
-// QBittorrent is the backend endpoint configuration.
+// QBittorrent is the legacy endpoint configuration. Since Phase 0.5
+// (ADR-0009) the password field is REMOVED: a config still carrying a
+// non-empty password fails load with an explicit migration error —
+// credentials live in the Secret Service, configured via the settings
+// surface. URL/Username here remain the fallback connection profile
+// for setups that never configured one via IPC.
 type QBittorrent struct {
 	// URL is the WebUI base URL, e.g. "http://127.0.0.1:8080".
 	URL string `json:"url"`
-	// Username and Password are optional; when Username is empty the
-	// adapter relies on the qBittorrent localhost auth bypass.
+	// Username is optional; when empty the adapter relies on the
+	// qBittorrent localhost auth bypass.
 	Username string `json:"username,omitempty"`
+	// Password is rejected at load (migration error). Kept in the
+	// struct only so the rejection can name the field.
 	Password string `json:"password,omitempty"`
 }
 
@@ -104,11 +112,16 @@ func Load(explicit string) (Config, error) {
 	if err := json.Unmarshal(data, &fileCfg); err != nil {
 		return cfg, fmt.Errorf("config: parse %s: %w", path, err)
 	}
+	if fileCfg.QBittorrent.Password != "" {
+		// Fail closed: no silent acceptance of plaintext credentials
+		// (ADR-0009). Local-bypass setups carry no password; remote
+		// users re-enter it once via the connection settings surface.
+		return cfg, fmt.Errorf("config: %s: the qbittorrent.password field is no longer supported (stored in the Secret Service since Phase 0.5) — remove it and configure credentials via OmaTorrent's connection settings", path)
+	}
 	if fileCfg.QBittorrent.URL != "" {
 		cfg.QBittorrent.URL = fileCfg.QBittorrent.URL
 	}
 	cfg.QBittorrent.Username = fileCfg.QBittorrent.Username
-	cfg.QBittorrent.Password = fileCfg.QBittorrent.Password
 	cfg.IPC.SocketPath = fileCfg.IPC.SocketPath
 	return cfg, nil
 }
