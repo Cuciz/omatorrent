@@ -5,18 +5,22 @@ current state. Keep under ~60 lines. Do not paste conversations.
 
 ## CURRENT OBJECTIVE
 
-Phase 0.3 MERGED (PR #6 @ merge `fc8615f`, head `0061926`, issue #5
-closed). Next: Phase 0.4 dashboard, per docs/ROADMAP.md.
+Phase 0.4 (dashboard, issue #7) implemented on
+`feat/phase04-dashboard`; PR open for external review, NOT merged.
 
 ## COMPLETED
 
 - Phase 0 (merged, PR #2); Phase 0.2 (merged, PR #4 @ 3e090d5, issue #3
   closed; final record docs/agent/PHASE02.md incl. merge SHA).
 - Phase 0.3 MERGED (PR #6 @ `fc8615f`, issue #5 closed; final record
-  docs/agent/PHASE03.md incl. merge SHA): live-verified qBittorrent
-  mutation semantics (docs/QBITTORRENT.md), ADR-0006 IPC v1.2 staged
-  mutation contract, daemon mutation layer, panel actions/add-magnet/
-  removal confirmations (manifest 0.3.0), extended quickshell smoke.
+  docs/agent/PHASE03.md incl. merge SHA): ADR-0006 IPC v1.2 staged
+  mutation contract, daemon mutation layer, panel actions.
+- Phase 0.4: ADR-0007 IPC v1.3 dashboard aggregates (daemon-side
+  state.Aggregate, free_space commit), overlay plugin
+  local.omatorrent-dashboard (separate plugin — menu model; destroyed
+  on close), panel header entry, smoke dashboard stages + regression
+  green; live/degraded/recovered/theme screenshots; 50x lifecycle
+  torture clean. Record: docs/agent/PHASE04.md.
 - Daemon 0.3.0-phase03 deployed via user systemd unit and validated live
   (panel live/degraded/recovered screenshots; journal clean).
 - Reviews: architecture/security/QA run post-implementation (verdicts in
@@ -29,7 +33,7 @@ closed). Next: Phase 0.4 dashboard, per docs/ROADMAP.md.
 
 ## BLOCKERS
 
-- None known. Phase 0.3 merged; Phase 0.4 not started.
+- None known. Phase 0.4 PR awaits external review; do NOT auto-merge.
 
 ## TESTS ACTUALLY RUN (Phase 0.3, 2026-09-19)
 

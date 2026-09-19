@@ -77,14 +77,22 @@ evidence; "code looks right" is never sufficient.
   matrix (hash/ref/url/key sets), replay result carries request id,
   result push reaches only mutating connections, disabled server,
   anti-drift example files.
-- **Shell checks** — `omarchy plugin validate` (manifest schema),
-  `tools/test_quickshell.sh` (isolated `qs` instance speaking IPC v1 to
-  the daemon with the widget's one-in-flight/id-matching discipline,
-  including mismatched-id rejection; Phase 0.3: the full v1.2 mutation
-  lifecycle against the disposable torrent — add/duplicate/replay/
-  invalid/pause/resume/remove both variants/stale), live bar + panel
-  observations + screenshots (visual-runtime standard), degraded states
-  observed (daemon stop/start), journal error-free.
+- **Shell checks** — `omarchy plugin validate` (manifest schema, both
+  plugins), `tools/test_quickshell.sh` (isolated `qs` instance speaking
+  IPC v1 to the daemon with the widget's one-in-flight/id-matching
+  discipline, including mismatched-id rejection; Phase 0.3: the full
+  v1.2 mutation lifecycle against the disposable torrent —
+  add/duplicate/replay/invalid/pause/resume/remove both variants/stale;
+  Phase 0.4: v1.3 dashboard.status exact-key schema, aggregate
+  invariants, counts.total cross-check against the v1.1 snapshot, and a
+  deterministic dashboard-frame guard model), live bar + panel +
+  dashboard observations + screenshots (visual-runtime standard),
+  degraded states observed (daemon stop/start), journal error-free.
+- **Dashboard lifecycle (0.4)** — `omarchy-shell shell toggle
+  local.omatorrent-dashboard` open/close cycles (50×) leave daemon fd
+  and socket-peer counts flat (destroy-on-close overlay), Escape and
+  click-outside close, reopen after shell restart and after daemon
+  restart recovery; theme light/dark observed via `omarchy theme set`.
 
 ## done_when examples (the standard)
 
