@@ -10,11 +10,12 @@ import (
 )
 
 func TestLoginSuccess(t *testing.T) {
-	var gotReferer string
+	var gotReferer, gotOrigin string
 	var gotUser, gotPass string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v2/auth/login" {
 			gotReferer = r.Header.Get("Referer")
+			gotOrigin = r.Header.Get("Origin")
 			gotUser, gotPass = r.PostFormValue("username"), r.PostFormValue("password")
 			// Real qBittorrent scopes the session cookie to the whole
 			// API (path=/, observed live).
@@ -41,8 +42,14 @@ func TestLoginSuccess(t *testing.T) {
 	if err := c.Login(context.Background()); err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	if !strings.HasPrefix(gotReferer, "http://127.0.0.1:") {
-		t.Fatalf("referer = %q", gotReferer)
+	// Phase 0.5 contract (ADR-0008): send NEITHER Origin nor Referer —
+	// qBittorrent 4.6→5.2 explicitly allows requests carrying neither
+	// (docs/QBITTORRENT.md), and omitting them is proxy-robust.
+	if gotReferer != "" {
+		t.Fatalf("referer = %q, want none", gotReferer)
+	}
+	if gotOrigin != "" {
+		t.Fatalf("origin = %q, want none", gotOrigin)
 	}
 	if gotUser != "admin" || gotPass != "hunter2" {
 		t.Fatal("credentials not posted")

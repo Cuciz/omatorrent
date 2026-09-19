@@ -13,30 +13,32 @@ import (
 	"syscall"
 
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/config"
+	"github.com/Cuciz/omatorrent/omatorrent-service/internal/connection"
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/ipc"
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/mutate"
-	"github.com/Cuciz/omatorrent/omatorrent-service/internal/qbittorrent"
+	"github.com/Cuciz/omatorrent/omatorrent-service/internal/secrets"
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/state"
 )
 
-const version = "0.4.0-phase04"
+const version = "0.5.0-phase05"
 
 func main() {
-	var configPath, socketOverride string
+	var configPath, socketOverride, connectionPath string
 	flag.StringVar(&configPath, "config", "", "explicit config file path (default: $XDG_CONFIG_HOME/omatorrent/service.json)")
 	flag.StringVar(&socketOverride, "socket", "", "override IPC socket path (absolute; testing/development)")
+	flag.StringVar(&connectionPath, "connection", "", "explicit connection profile path (default: $OMATORRENT_CONNECTION or $XDG_CONFIG_HOME/omatorrent/connection.json)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
-	if err := run(log, configPath, socketOverride); err != nil {
+	if err := run(log, configPath, socketOverride, connectionPath); err != nil {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, configPath, socketOverride string) error {
+func run(log *slog.Logger, configPath, socketOverride, connectionPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -45,19 +47,43 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 		cfg.IPC.SocketPath = socketOverride
 	}
 
-	qbt, err := qbittorrent.New(cfg.QBittorrent.URL, cfg.QBittorrent.Username, cfg.QBittorrent.Password)
+	// Connection profile (ADR-0008): the daemon-owned store wins; the
+	// service.json endpoint is the fallback local profile. Credentials
+	// come from the Secret Service only (ADR-0009) — config passwords
+	// are already rejected at load.
+	if connectionPath == "" {
+		connectionPath = os.Getenv("OMATORRENT_CONNECTION")
+	}
+	if connectionPath == "" {
+		if p, err := connection.DefaultStorePath(); err == nil {
+			connectionPath = p
+		}
+	}
+	fallback := connection.Profile{URL: cfg.QBittorrent.URL, Username: cfg.QBittorrent.Username, TLSMode: connection.TLSSystem}
+	profile, _, err := connection.LoadActive(connectionPath, fallback)
+	if err != nil {
+		return err
+	}
+	prov := secrets.NewSecretTool()
+	qbt, err := connection.BuildClient(profile, prov)
 	if err != nil {
 		return err
 	}
 	syncer := state.New(qbt, state.Options{}, log)
 	mutator := mutate.New(qbt, syncer, mutate.Options{}, log)
+	// The syncer is both the status source and the sync-side switcher;
+	// the mutator guards the mutation side (ADR-0008 §8).
+	manager, err := connection.NewManager(connectionPath, fallback, prov, syncer, syncer, mutator, log)
+	if err != nil {
+		return err
+	}
 
 	socketPath, err := ipc.ResolveSocketPath(cfg.IPC.SocketPath)
 	if err != nil {
 		return err
 	}
-	handler := &daemonHandler{syncer: syncer, mutator: mutator}
-	srv, err := ipc.New(socketPath, handler, handler, handler, log)
+	handler := &daemonHandler{syncer: syncer, mutator: mutator, manager: manager}
+	srv, err := ipc.New(socketPath, handler, handler, handler, handler, log)
 	if err != nil {
 		return err
 	}
@@ -73,7 +99,8 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 	log.Info("omatorrent-service started",
 		"version", version,
 		"socket", socketPath,
-		"qbittorrent_url", cfg.QBittorrent.URL, // endpoint only; never credentials
+		"qbittorrent_url", profile.URL, // endpoint only; never credentials
+		"tls_mode", profile.TLSMode,
 	)
 
 	select {
@@ -98,6 +125,7 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 type daemonHandler struct {
 	syncer  *state.Syncer
 	mutator *mutate.Mutator
+	manager *connection.Manager
 }
 
 func (h *daemonHandler) Health() bool { return h.syncer.Health() }
@@ -251,4 +279,55 @@ func (h *daemonHandler) Results() (<-chan ipc.MutationResult, func()) {
 		}
 	}()
 	return ch, cancel
+}
+
+// ---- v1.4 connection surface (ADR-0008): thin mapping between the
+// ipc wire types and the connection Manager. No secret ever crosses
+// back: status carries only has_secret, test/configure results carry
+// only fixed codes and host labels. ----
+
+func (h *daemonHandler) ConnectionStatus() ipc.ConnectionStatusData {
+	st := h.manager.Status()
+	return ipc.ConnectionStatusData{
+		Configured: st.Configured,
+		Mode:       st.Mode,
+		Host:       st.Host,
+		Transport:  st.Transport,
+		Insecure:   st.Insecure,
+		Username:   st.Username,
+		HasSecret:  st.HasSecret,
+		TLSMode:    st.TLSMode,
+		Status:     st.Status,
+		Detail:     st.Detail,
+		Epoch:      st.Epoch,
+	}
+}
+
+func (h *daemonHandler) ConnectionTest(r ipc.ConnectionTestRequest) ipc.ConnectionTestData {
+	res := h.manager.Test(context.Background(), connection.TestParams{
+		URL: r.URL, Username: r.Username, Password: r.Password,
+		UseStoredPassword: r.UseStoredPassword, TLSMode: r.TLSMode,
+		Pin: r.Pin, AllowInsecureHTTP: r.AllowInsecureHTTP,
+	})
+	return ipc.ConnectionTestData{
+		OK: res.OK, Status: res.Status, Detail: res.Detail,
+		Host: res.Host, Transport: res.Transport,
+		AppVersion: res.AppVersion, WebAPIVersion: res.WebAPIVersion,
+		OfferedFingerprint: res.OfferedFingerprint,
+	}
+}
+
+func (h *daemonHandler) ConnectionConfigure(r ipc.ConnectionConfigureRequest) ipc.ConnectionConfigureData {
+	res := h.manager.Configure(context.Background(), connection.ConfigureParams{
+		TestParams: connection.TestParams{
+			URL: r.URL, Username: r.Username, Password: r.Password,
+			UseStoredPassword: r.UseStoredPassword, TLSMode: r.TLSMode,
+			Pin: r.Pin, AllowInsecureHTTP: r.AllowInsecureHTTP,
+		},
+		SecretAction: r.SecretAction,
+	})
+	return ipc.ConnectionConfigureData{
+		OK: res.OK, Rejection: res.Rejection, Epoch: res.Epoch,
+		Mode: res.Mode, Host: res.Host, Transport: res.Transport,
+	}
 }
