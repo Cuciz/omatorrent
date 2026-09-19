@@ -38,7 +38,7 @@ type blockingBackend struct {
 	once    sync.Once
 }
 
-func (b *blockingBackend) Login(ctx context.Context) error                  { return nil }
+func (b *blockingBackend) Login(ctx context.Context) error                   { return nil }
 func (b *blockingBackend) AppVersion(ctx context.Context) (string, error)    { return "vA", nil }
 func (b *blockingBackend) WebAPIVersion(ctx context.Context) (string, error) { return "2.11.0", nil }
 func (b *blockingBackend) SyncMaindata(ctx context.Context, rid int64) (qbittorrent.Maindata, error) {

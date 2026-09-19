@@ -22,7 +22,11 @@ import (
 const (
 	AttrService = "omatorrent"
 	AttrKind    = "qbt-webui-password"
-	itemLabel   = "OmaTorrent — qBittorrent WebUI password"
+	// itemLabel is pure ASCII on purpose: GLib converts labels from the
+	// locale charset, and the daemon's minimal child environment may run
+	// under C/POSIX locale where non-ASCII fails conversion (live-
+	// verified: "Invalid byte sequence in conversion input", exit 2).
+	itemLabel = "OmaTorrent qBittorrent WebUI password"
 )
 
 // ErrUnavailable reports a missing/unusable secret store (secret-tool
@@ -100,7 +104,7 @@ func (s *SecretTool) run(ctx context.Context, args []string, stdin []byte) (stdo
 func minimalEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
-		for _, keep := range []string{"PATH=", "HOME=", "DBUS_SESSION_BUS_ADDRESS=", "XDG_RUNTIME_DIR="} {
+		for _, keep := range []string{"PATH=", "HOME=", "DBUS_SESSION_BUS_ADDRESS=", "XDG_RUNTIME_DIR=", "LANG=", "LC_ALL=", "LC_CTYPE="} {
 			if strings.HasPrefix(kv, keep) {
 				env = append(env, kv)
 			}

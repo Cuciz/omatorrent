@@ -56,28 +56,28 @@ func TestSubPathPrefixSurvives(t *testing.T) {
 
 func TestValidateURLRejects(t *testing.T) {
 	bad := []string{
-		"",                                   // empty
-		"ftp://127.0.0.1:8080",               // scheme
-		"file:///etc/passwd",                 // scheme
-		"ssh://user@host",                    // scheme + userinfo
-		"unix:///run/sock",                   // scheme
-		"javascript:alert(1)",                // scheme
-		"data:text/plain,hi",                 // scheme
-		"gopher://host",                      // scheme
-		"https://user:pass@host",             // embedded credentials
-		"https://user@host",                  // embedded user
-		"https://",                           // empty host
-		"https://host:notaport",              // bad port
-		"https://host:0",                     // port 0
-		"https://host:99999",                 // port range
-		"https://host/?q=1",                  // query
-		"https://host/#frag",                 // fragment
-		"https://host/a/../b",                // dot segment
-		"https://host/./a",                   // dot segment
-		"https://host//a",                    // empty segment
-		"https://host/a\\b",                  // backslash
-		"https://ho st/",                     // space
-		"https://host/\x01",                  // control char
+		"",                       // empty
+		"ftp://127.0.0.1:8080",   // scheme
+		"file:///etc/passwd",     // scheme
+		"ssh://user@host",        // scheme + userinfo
+		"unix:///run/sock",       // scheme
+		"javascript:alert(1)",    // scheme
+		"data:text/plain,hi",     // scheme
+		"gopher://host",          // scheme
+		"https://user:pass@host", // embedded credentials
+		"https://user@host",      // embedded user
+		"https://",               // empty host
+		"https://host:notaport",  // bad port
+		"https://host:0",         // port 0
+		"https://host:99999",     // port range
+		"https://host/?q=1",      // query
+		"https://host/#frag",     // fragment
+		"https://host/a/../b",    // dot segment
+		"https://host/./a",       // dot segment
+		"https://host//a",        // empty segment
+		"https://host/a\\b",      // backslash
+		"https://ho st/",         // space
+		"https://host/\x01",      // control char
 		"https://host/" + string(make([]byte, 200)), // path too long
 		"http://" + string(make([]byte, 2048)),      // total too long
 	}
