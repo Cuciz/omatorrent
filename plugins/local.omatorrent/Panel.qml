@@ -6,7 +6,8 @@ import qs.Commons
 import qs.Ui
 import "MutationClient.js" as MC
 
-// OmaTorrent torrent panel: presentation only (ADR-0001). Renders the
+// Sprout torrent panel (OmaTorrent internals; Phase 0.5.1 brand,
+// docs/BRAND.md): presentation only (ADR-0001). Renders the
 // daemon's normalized torrent state over IPC v1.1 (ADR-0005): one
 // subscription delivers a full snapshot then bounded delta frames; the
 // header polls v1.0 system.status for backend state and global speeds.
@@ -715,8 +716,8 @@ Panel {
     open: root.opened
     padding: Style.spacing.panelPadding
     contentWidth: Style.space(360)
-    contentHeight: root.settingsOpen ? Style.space(430)
-      : Style.space(440)
+    contentHeight: root.settingsOpen ? Style.space(450)
+      : Style.space(460)
       + (root.addOpen ? Style.space(12) : 0)
       + (root.confirmHash !== "" ? Style.space(13) : 0)
       + (root.mutError !== "" ? Style.space(6) : 0)
@@ -732,96 +733,137 @@ Panel {
         anchors.centerIn: parent
         spacing: Style.space(4)
 
-        // ---- Header: backend state + global speeds.
-        Row {
+        // ---- Header (Phase 0.5.1): product identity row + state row.
+        //      Brand is the compact glyph + name only; state, speeds and
+        //      controls keep Omarchy theme tokens and semantics.
+        Column {
           width: parent.width
-          spacing: Style.space(2)
+          spacing: Style.space(1)
 
-          Rectangle {
-            width: Style.space(3)
-            height: Style.space(3)
-            radius: width / 2
-            anchors.verticalCenter: parent.verticalCenter
-            color: root.stateColor
+          // Identity row: sprout glyph + name, global speeds right.
+          Row {
+            width: parent.width
+            spacing: Style.space(2)
+
+            SproutGlyph {
+              id: headerGlyph
+              variant: "compact"
+              height: Style.font.body
+              anchors.verticalCenter: parent.verticalCenter
+              glyphColor: root.barForeground
+              opacity: 0.85
+            }
+            Text {
+              id: headerName
+              anchors.verticalCenter: parent.verticalCenter
+              text: "sprout"
+              color: root.barForeground
+              opacity: 0.85
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            // glyph + name + speeds with 3 Row spacings; spacer = rest.
+            Item { width: Math.max(0, parent.width - headerGlyph.width - headerName.implicitWidth - headerSpeeds.implicitWidth - Style.space(2) * 3); height: 1 }
+            Text {
+              id: headerSpeeds
+              anchors.verticalCenter: parent.verticalCenter
+              text: "\u2193 " + root.formatSpeed(root.dlSpeed) + "   \u2191 " + root.formatSpeed(root.upSpeed)
+              color: root.barForeground
+              opacity: 0.8
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
           }
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.headerState
-            color: root.barForeground
-            opacity: 0.62
-            font.pixelSize: Style.font.caption
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          }
-          Item { width: parent.width - headerSpeeds.implicitWidth - headerDash.implicitWidth - headerAdd.implicitWidth - Style.space(12); height: 1 }
-          Text {
-            id: headerSpeeds
-            anchors.verticalCenter: parent.verticalCenter
-            text: "\u2193 " + root.formatSpeed(root.dlSpeed) + "   \u2191 " + root.formatSpeed(root.upSpeed)
-            color: root.barForeground
-            opacity: 0.8
-            font.pixelSize: Style.font.caption
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          }
-          // Connection settings entry (Phase 0.5): one canonical
-          // settings surface as a mode of this panel (native pattern;
-          // ADR-0008 §10).
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.settingsOpen ? "\u2190" : "\u2699"
-            color: root.settingsOpen ? Color.accent : root.barForeground
-            opacity: 0.8
-            font.pixelSize: Style.font.body
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                if (root.settingsOpen) {
-                  root.settingsOpen = false
-                  root.passText = "" // abandoned forms must not retain secrets
-                } else {
-                  root.openSettings()
+
+          // State row: connection state + entries (settings/dashboard/add).
+          Row {
+            width: parent.width
+            spacing: Style.space(2)
+
+            Rectangle {
+              width: Style.space(3)
+              height: Style.space(3)
+              radius: width / 2
+              anchors.verticalCenter: parent.verticalCenter
+              color: root.stateColor
+            }
+            Text {
+              id: headerStateText
+              anchors.verticalCenter: parent.verticalCenter
+              // Long host labels degrade gracefully: elide within the
+              // space left of the three header entries.
+              width: Math.min(implicitWidth, parent.width - Style.space(3) - headerSettings.implicitWidth - headerDash.implicitWidth - headerAdd.implicitWidth - Style.space(2) * 5)
+              elide: Text.ElideRight
+              text: root.headerState
+              color: root.barForeground
+              opacity: 0.62
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            // dot + state text + 3 entry glyphs with 5 Row spacings.
+            Item { width: Math.max(0, parent.width - Style.space(3) - headerStateText.implicitWidth - headerSettings.implicitWidth - headerDash.implicitWidth - headerAdd.implicitWidth - Style.space(2) * 5); height: 1 }
+            // Connection settings entry (Phase 0.5): one canonical
+            // settings surface as a mode of this panel (native pattern;
+            // ADR-0008 §10).
+            Text {
+              id: headerSettings
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.settingsOpen ? "\u2190" : "\u2699"
+              color: root.settingsOpen ? Color.accent : root.barForeground
+              opacity: 0.8
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  if (root.settingsOpen) {
+                    root.settingsOpen = false
+                    root.passText = "" // abandoned forms must not retain secrets
+                  } else {
+                    root.openSettings()
+                  }
                 }
               }
             }
-          }
-          // Dashboard entry (Phase 0.4): opens the companion overlay
-          // plugin through the first-party shell routing (the omarchy
-          // menu bar-widget pattern) — this popout closes with it.
-          Text {
-            id: headerDash
-            anchors.verticalCenter: parent.verticalCenter
-            text: "\u25A4"
-            color: Color.accent
-            opacity: 0.8
-            font.pixelSize: Style.font.body
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                if (root.bar && typeof root.bar.run === "function") {
-                  root.close()
-                  root.bar.run("omarchy-shell shell toggle local.omatorrent-dashboard")
+            // Dashboard entry (Phase 0.4): opens the companion overlay
+            // plugin through the first-party shell routing (the omarchy
+            // menu bar-widget pattern) — this popout closes with it.
+            Text {
+              id: headerDash
+              anchors.verticalCenter: parent.verticalCenter
+              text: "\u25A4"
+              color: Color.accent
+              opacity: 0.8
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  if (root.bar && typeof root.bar.run === "function") {
+                    root.close()
+                    root.bar.run("omarchy-shell shell toggle local.omatorrent-dashboard")
+                  }
                 }
               }
             }
-          }
-          // Add magnet entry point (daemon validates authoritatively).
-          Text {
-            id: headerAdd
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.addOpen ? "\u00D7" : "+"
-            color: root.addOpen ? Color.accent : root.barForeground
-            opacity: 0.8
-            font.pixelSize: Style.font.body
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                root.addOpen = !root.addOpen
-                if (!root.addOpen) root.addText = ""
+            // Add magnet entry point (daemon validates authoritatively).
+            Text {
+              id: headerAdd
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.addOpen ? "\u00D7" : "+"
+              color: root.addOpen ? Color.accent : root.barForeground
+              opacity: 0.8
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.addOpen = !root.addOpen
+                  if (!root.addOpen) root.addText = ""
+                }
               }
             }
           }
@@ -1064,10 +1106,52 @@ Panel {
           }
 
           // Empty / degraded states.
-          Text {
-            visible: view.count === 0 && root.backendOk
+          // Brand empty state (docs/BRAND.md): the plant metaphor lives
+          // HERE ONLY — glyph, wordmark, one line of copy, one action.
+          Column {
+            visible: view.count === 0 && root.backendOk && root.order.length === 0
             anchors.centerIn: parent
-            text: root.order.length === 0 ? "No torrents" : "Nothing in this filter"
+            spacing: Style.space(3)
+
+            SproutGlyph {
+              variant: "full"
+              height: Style.space(11)
+              anchors.horizontalCenter: parent.horizontalCenter
+              glyphColor: root.barForeground
+              opacity: 0.75
+            }
+            SproutGlyph {
+              variant: "wordmark"
+              height: Style.space(5)
+              anchors.horizontalCenter: parent.horizontalCenter
+              glyphColor: "#A1D06A"
+            }
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "No torrents growing yet."
+              color: root.barForeground
+              opacity: 0.55
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "Add magnet"
+              color: Color.accent
+              opacity: 0.9
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.addOpen = true
+              }
+            }
+          }
+          Text {
+            visible: view.count === 0 && root.backendOk && root.order.length > 0
+            anchors.centerIn: parent
+            text: "Nothing in this filter"
             color: root.barForeground
             opacity: 0.45
             font.pixelSize: Style.font.body
@@ -1155,12 +1239,26 @@ Panel {
           width: parent.width
           spacing: Style.space(3)
 
-          Text {
-            text: "qBittorrent connection"
-            color: root.barForeground
-            opacity: 0.9
-            font.pixelSize: Style.font.body
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          // Settings title carries the product name (docs/BRAND.md):
+          // one canonical connection surface, branded but technical.
+          Row {
+            spacing: Style.space(2)
+
+            SproutGlyph {
+              variant: "compact"
+              height: Style.font.body
+              anchors.verticalCenter: parent.verticalCenter
+              glyphColor: root.barForeground
+              opacity: 0.85
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "sprout · qBittorrent connection"
+              color: root.barForeground
+              opacity: 0.9
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
           }
 
           // Address

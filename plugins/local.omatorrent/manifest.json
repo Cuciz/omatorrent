@@ -1,14 +1,18 @@
 {
   "schemaVersion": 1,
   "id": "local.omatorrent",
-  "name": "OmaTorrent",
-  "version": "0.5.0",
+  "name": "Sprout",
+  "version": "0.5.1",
   "author": "Cuciz",
-  "description": "qBittorrent transfer status via the omatorrent-service daemon.",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "description": "qBittorrent transfer status and torrent panel via the omatorrent-service daemon.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
   "barWidget": {
-    "displayName": "OmaTorrent",
+    "displayName": "Sprout",
     "description": "qBittorrent transfer state, torrent panel with essential actions.",
     "category": "Network",
     "allowMultiple": false,

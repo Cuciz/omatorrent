@@ -4,7 +4,8 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// OmaTorrent bar widget: presentation only (ADR-0001). All state comes
+// Sprout bar widget (OmaTorrent internals; Phase 0.5.1 brand,
+// docs/BRAND.md): presentation only (ADR-0001). All state comes
 // from omatorrent-service over IPC v1 (ADR-0004/0005) via a Unix socket;
 // no qBittorrent HTTP, no secrets, no business logic here.
 //
@@ -254,12 +255,18 @@ BarWidget {
     bar: root.bar
     text: root.statusText
     foreground: root.statusColor
-    labelVisible: true
+    // The label is drawn by the glyph row below (same font, native
+    // rendering); WidgetButton's own centered label stays off so the
+    // pair composes as one unit. Vertical bars stay text-only.
+    labelVisible: false
     hasVisualContent: true
     tooltipText: root.tooltip
     onPressed: root.toggle()
 
-    implicitWidth: vertical ? barSize : textMetrics.implicitWidth + scaledHorizontalMargin * 2
+    readonly property real glyphExtent: vertical ? 0 : Math.round(fontSize * 12 / 10)
+    readonly property real glyphGap: vertical ? 0 : Style.space(2)
+
+    implicitWidth: vertical ? barSize : textMetrics.implicitWidth + glyphExtent + glyphGap + scaledHorizontalMargin * 2
     implicitHeight: vertical ? barSize : Math.max(barSize, textMetrics.implicitHeight + scaledVerticalPadding * 2)
 
     Text {
@@ -268,6 +275,41 @@ BarWidget {
       font.family: button.fontFamily
       font.pixelSize: button.fontSize
       text: root.statusText
+    }
+
+    // Brand identity in the bar is the compact glyph before the label
+    // (docs/BRAND.md): theme-foreground monochrome, sized with the bar
+    // font, never increasing bar height. On vertical bars the plain
+    // WidgetButton label path takes over.
+    Text {
+      visible: button.vertical
+      anchors.centerIn: parent
+      text: root.statusText
+      color: root.statusColor
+      font.family: button.fontFamily
+      font.pixelSize: button.fontSize
+      renderType: Text.NativeRendering
+    }
+
+    Row {
+      visible: !button.vertical
+      anchors.centerIn: parent
+      spacing: button.glyphGap
+
+      SproutGlyph {
+        variant: "compact"
+        height: Math.round(button.fontSize)
+        anchors.verticalCenter: parent.verticalCenter
+        glyphColor: root.statusColor
+      }
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.statusText
+        color: root.statusColor
+        font.family: button.fontFamily
+        font.pixelSize: button.fontSize
+        renderType: Text.NativeRendering
+      }
     }
   }
 }

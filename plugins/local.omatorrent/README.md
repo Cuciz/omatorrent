@@ -1,19 +1,24 @@
-# local.omatorrent — OmaTorrent Phase 0 bar proof
+# local.omatorrent — Sprout bar widget + torrent panel
 
 Development-namespace plugin (`local.` prefix; public marketplace ID is
-still OPEN — see ADR-0004). This is the Phase 0 architecture proof, not
-the product UI.
+still OPEN — see ADR-0004) carrying the Sprout product identity
+(Phase 0.5.1, docs/BRAND.md): compact glyph in the bar, branded panel
+header and empty state. Technical IDs keep the `omatorrent` name
+deliberately.
 
 ## What it does
 
-A minimal Omarchy bar widget showing real qBittorrent transfer state:
+An Omarchy bar widget showing real qBittorrent transfer state:
 
-- `↓ … ↑ …` — live transfer speeds
-- `qBT ●` — connected to qBittorrent, idle
-- `qBT ERROR` — daemon reachable, qBittorrent unreachable
-- `qBT OFFLINE` — omatorrent-service not running
+- `[glyph] ↓ … ↑ …` — live transfer speeds
+- `[glyph] qBT ●` — connected to qBittorrent, idle
+- `[glyph] qBT ERROR` — daemon reachable, qBittorrent unreachable
+- `[glyph] qBT OFFLINE` — omatorrent-service not running
 
 Tooltip shows the qBittorrent app/WebAPI versions and torrent count.
+The panel (bar-widget popout) lists torrents with progress, filters,
+pause/resume, magnet add, safe removal, and the qBittorrent connection
+settings (Phase 0.5).
 
 ## Architecture (binding)
 
