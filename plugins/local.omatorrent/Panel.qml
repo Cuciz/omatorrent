@@ -528,7 +528,7 @@ Panel {
             font.pixelSize: Style.font.caption
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
           }
-          Item { width: parent.width - headerSpeeds.implicitWidth - headerAdd.implicitWidth - Style.space(10); height: 1 }
+          Item { width: parent.width - headerSpeeds.implicitWidth - headerDash.implicitWidth - headerAdd.implicitWidth - Style.space(12); height: 1 }
           Text {
             id: headerSpeeds
             anchors.verticalCenter: parent.verticalCenter
@@ -537,6 +537,28 @@ Panel {
             opacity: 0.8
             font.pixelSize: Style.font.caption
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          // Dashboard entry (Phase 0.4): opens the companion overlay
+          // plugin through the first-party shell routing (the omarchy
+          // menu bar-widget pattern) — this popout closes with it.
+          Text {
+            id: headerDash
+            anchors.verticalCenter: parent.verticalCenter
+            text: "\u25A4"
+            color: Color.accent
+            opacity: 0.8
+            font.pixelSize: Style.font.body
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                if (root.bar && typeof root.bar.run === "function") {
+                  root.close()
+                  root.bar.run("omarchy-shell shell toggle local.omatorrent-dashboard")
+                }
+              }
+            }
           }
           // Add magnet entry point (daemon validates authoritatively).
           Text {
