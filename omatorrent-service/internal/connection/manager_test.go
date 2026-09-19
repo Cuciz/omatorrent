@@ -117,6 +117,11 @@ type harness struct {
 func newHarness(t *testing.T, fallback Profile, initial ClientBuilder) *harness {
 	t.Helper()
 	prov := &secrets.Fake{}
+	// Route the provider through a passive gate: its sawGet channel
+	// lets the harness WAIT for the Manager's one-shot background
+	// presence probe deterministically (counter baselines in
+	// concurrency tests then cannot race the probe).
+	gate := newGatingProvider(prov)
 	client, err := initial()
 	if err != nil {
 		t.Fatal(err)
@@ -126,11 +131,12 @@ func newHarness(t *testing.T, fallback Profile, initial ClientBuilder) *harness 
 	// tests (production default is 10 s; behavior is identical).
 	mutator := mutate.New(client, syncer, mutate.Options{ReconcileWindow: 60 * time.Millisecond}, quietLog())
 	store := profilePath(t)
-	mgr, err := NewManager(store, fallback, prov, syncer, syncer, mutator, quietLog())
+	mgr, err := NewManager(store, fallback, gate, syncer, syncer, mutator, quietLog())
 	if err != nil {
 		t.Fatal(err)
 	}
 	mgr.testPace = 0 // tests run credentialed probes back-to-back
+	<-gate.sawGet    // presence probe entered; counters are stable from here
 	return &harness{t: t, store: store, prov: prov, syncer: syncer, mutator: mutator, mgr: mgr}
 }
 

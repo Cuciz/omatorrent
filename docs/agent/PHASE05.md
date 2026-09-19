@@ -267,6 +267,84 @@ smoke re-run green:
     LoadStore and ReadStoreRaw (no check drift).
   - F6: dead assignment removed.
 
+## Final concurrency correction (external review: REQUEST CHANGES, 1 blocker)
+
+The external review of head `0b2ed7f` found that the PRODUCTION code
+still took its rollback snapshots (and state-dependent TLS/pin
+resolution) BEFORE acquiring the configure drain — despite commit
+0b2ed7f, PHASE05.md and the PR body all claiming "exclusivity before
+snapshots". That claim was wrong: the reorder patch in the 0b2ed7f
+authoring session was lost to a failed edit script before its file
+write, and the tests added alongside it passed vacuously w.r.t. the
+ordering (`TestConfigureExclusiveUnderDrain` refutes regardless of
+snapshot placement; `TestConcurrentConfiguresSerialize`'s invariant
+survives stale rollbacks). This is recorded plainly: the earlier
+evidence statements were incorrect, and the deterministic regression
+below is the proof that actually matters.
+
+**Deterministic regression** (`TestDeterministicStaleSnapshotConcurrency`,
+`internal/connection/concurrency_regression_test.go`): a gating
+provider pauses T2 by channel exactly inside its secret snapshot —
+pre-BeginSwitch on the old ordering, drain-holding on the fixed one —
+while T1 runs a full Configure. No sleeps, no scheduler luck.
+
+- Result on the OLD head `0b2ed7f` (executed 2026-09-19):
+  **FAIL** — "T1 committed B, but after T2's failure the persisted
+  profile is [A] — a committed activation was rolled back". The
+  historical bug reproduced deterministically. (An earlier
+  collision-based draft PASSED on old code because the collision that
+  blocked the forward write also blocked the rollback write; the
+  final test uses a test-only post-persistence build-failure hook so
+  the rollback really executes.)
+- Result on the fixed code: **PASS** — T1 is refused
+  (`mutations_pending`) and observationally inert (no profile snapshot
+  via the `readStoreRawFn` spy, zero provider calls, no store/epoch/
+  profile change); T2 then fails after its mutation point and restores
+  its OWN snapshot; final state is A in runtime, on disk, in the
+  secret pairing and after restart. The suite was looped 10× under
+  `-race` (green) after making the test harness deterministically wait
+  for the Manager's background presence probe (a counter-race flake
+  was found and fixed, not ignored).
+
+**Corrected Configure ordering** (now literally true in production,
+`internal/connection/manager.go`):
+
+1. PURE request validation — URL, HTTP policy, secret-action enum,
+   replace-requires-password, TLS token + pin SYNTAX
+   (`validateTLSRequest`, no Manager-state reads). Fully inert
+   rejections.
+2. `BeginSwitch` — exclusivity; a `drainHeld` guard with a deferred
+   `AbortSwitch` releases the drain on EVERY post-acquisition
+   failure; `CommitSwap` clears the guard on success (no
+   double-abort).
+3. Raw-bytes profile snapshot (`readStoreRawFn`).
+4. Secret snapshot (replace/delete only; `keep` never touches the
+   provider).
+5. State-dependent TLS resolution (`resolveTLSOptions`: offered-cert
+   cache + active-pin reuse — reads CURRENT Manager state, therefore
+   only under exclusivity; a superseded profile's pin cannot supply
+   trust material).
+6. Build `next` profile; apply the secret action (`secretMutated`).
+7. `SaveStore(next)` (`storeMutated`).
+8. Build-failure hook (test-only) + client build.
+9. Syncer switch → `CommitSwap` → `drainHeld = false` → Manager
+   state/epoch update → best-effort old-client logout.
+
+Rollback runs only for what actually mutated (`secretMutated` /
+`storeMutated`): a failed Store/Delete is treated as atomic (nothing
+restored); a SaveStore failure restores only the secret; a post-persist
+failure restores secret AND raw store bytes.
+
+New/changed tests: `TestDeterministicStaleSnapshotConcurrency`
+(the proof), `TestConfigureExclusiveUnderDrain` (strengthened with the
+`readStoreRawFn` spy + provider counters + epoch/profile assertions),
+`TestConcurrentConfiguresSerialize` (retained),
+`TestPinStateResolvedUnderExclusivity` (§11: active-pin reuse resolved
+under exclusivity; concurrent pin-reuse refused inertly; superseded
+pins stay `pin_unknown`; TOFU unchanged),
+`TestConfigureRollbackRestoresCurrentNotStale` (now fails T2 after
+persistence via the hook so BOTH rollback writes really land).
+
 ## Known limitations
 
 - `connection.test`/`connection.configure` carry the password once per

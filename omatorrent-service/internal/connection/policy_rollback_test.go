@@ -2,6 +2,7 @@ package connection
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -148,20 +149,17 @@ func TestConfigureRollbackRestoresCurrentNotStale(t *testing.T) {
 		URL: tsB.URL, Username: "b", Password: []byte("secretB"), TLSMode: TLSSystem}, SecretAction: "replace"}); !cfg.OK {
 		t.Fatalf("A->B = %+v", cfg)
 	}
-	// B → C fails AFTER the transaction started persisting (the temp
-	// collision makes SaveStore fail atomically; the rollback path —
-	// including the secret restore — runs exactly as for any
-	// post-persistence failure).
-	tmp := filepath.Join(filepath.Dir(h.store), ".connection.json.tmp")
-	if err := os.WriteFile(tmp, []byte("collision"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// B → C fails AFTER persistence: SaveStore(C) lands, then the
+	// test-only build hook aborts the transaction, so BOTH rollback
+	// writes (secret restore + raw store restore) really execute.
+	buildFailureHook = func(next Profile) error { return errPostPersist }
+	defer func() { buildFailureHook = nil }()
 	cfg := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
 		URL: tsC.URL, Username: "c", Password: []byte("secretC"), TLSMode: TLSSystem}, SecretAction: "replace"})
-	if cfg.OK || cfg.Rejection != RejectStorageError {
-		t.Fatalf("B->C = %+v, want storage_error", cfg)
+	if cfg.OK || cfg.Rejection != RejectInvalidURL {
+		t.Fatalf("B->C = %+v, want the injected post-persistence rejection", cfg)
 	}
-	os.Remove(tmp)
+	buildFailureHook = nil
 
 	// Runtime remains B; the persisted file is B again; the secret is
 	// B's again; A is nowhere.
@@ -472,16 +470,122 @@ func TestConfigureExclusiveUnderDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _, _ := ReadStoreRaw(h.store)
+	baseEpoch := h.mgr.Status().Epoch
+
+	// Spy on the snapshot seam: a refused configure must not even read
+	// the persisted profile.
+	reads := 0
+	readStoreRawFn = func(path string) ([]byte, bool, error) {
+		reads++
+		return ReadStoreRaw(path)
+	}
+	defer func() { readStoreRawFn = ReadStoreRaw }()
+
+	g0, s0, d0 := h.prov.Counts()
 	cfg := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
 		URL: ts.URL, Username: "u", Password: []byte("x"), TLSMode: TLSSystem}, SecretAction: "replace"})
 	if cfg.OK || cfg.Rejection != RejectMutationsPending {
 		t.Fatalf("configure under drain = %+v, want mutations_pending", cfg)
 	}
+	if reads != 0 {
+		t.Fatalf("refused configure took %d profile snapshots (must be 0)", reads)
+	}
+	if g1, s1, d1 := h.prov.Counts(); g1 != g0 || s1 != s0 || d1 != d0 {
+		t.Fatal("refused configure called the secret provider")
+	}
 	after, _, _ := ReadStoreRaw(h.store)
 	if string(before) != string(after) {
 		t.Fatal("store modified by a refused (drained) configure")
 	}
+	if e := h.mgr.Status().Epoch; e != baseEpoch {
+		t.Fatalf("refused configure changed the epoch: %d -> %d", baseEpoch, e)
+	}
+	if u := h.mgr.Profile().URL; u != ts.URL {
+		t.Fatalf("refused configure changed the active profile: %s", u)
+	}
 	h.mutator.AbortSwitch()
+}
+
+// §11: active-pin reuse resolves ONLY while exclusivity is held. With
+// a pinned profile active and another transaction paused holding the
+// drain, a concurrent Configure reusing the active pin is refused
+// inertly; the paused transaction then commits with trust material
+// derived from the CURRENT profile. A pin belonging to a superseded
+// profile (cache empty) stays pin_unknown.
+func TestPinStateResolvedUnderExclusivity(t *testing.T) {
+	fx := &qbFixture{torrents: 1, appVersion: "v5.2.3", apiVersion: "2.15.1"}
+	ts := httptest.NewServer(fx.handler())
+	defer ts.Close()
+	h := newHarness(t, localProfile(ts.URL), func() (*qbittorrent.Client, error) {
+		return qbittorrent.New(ts.URL, "", "")
+	})
+
+	// Seed the offered-certificate cache with a REAL self-signed
+	// certificate (a fake DER would fail PEM-anchor construction).
+	_, der := selfSignedFor(t, "pin-concurrency.local")
+	fp := qbittorrent.Fingerprint(der)
+	h.mgr.cacheOffered(fp, der)
+
+	// Activate a PINNED profile A (pin trust from the cache).
+	cfg := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+		URL: ts.URL, TLSMode: TLSPin, Pin: fp}, SecretAction: "keep"})
+	if !cfg.OK {
+		t.Fatalf("pin activation = %+v", cfg)
+	}
+	activePin := h.mgr.Profile().PinFingerprint
+	if activePin != fp {
+		t.Fatalf("active pin = %q", activePin)
+	}
+
+	// Pause T2 holding the drain (it blocks in its secret snapshot via
+	// a gating provider; keep is not used so the snapshot runs).
+	prov := &secrets.Fake{}
+	prov.SetSecret([]byte("s"))
+	gate := newGatingProvider(prov)
+	h.mgr.secrets = gate // safe here: the presence probe already ran
+	entered, release := gate.arm(gate.count() + 1)
+	t2done := make(chan ConfigureResult, 1)
+	go func() {
+		t2done <- h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+			URL: ts.URL, TLSMode: TLSPin, Pin: activePin, Password: []byte("next")}, SecretAction: "replace"})
+	}()
+	<-entered // T2 holds the drain, paused at its snapshot.
+
+	// Concurrent Configure reusing the ACTIVE pin: refused, inert.
+	baseEpoch := h.mgr.Status().Epoch
+	c2 := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+		URL: ts.URL, TLSMode: TLSPin, Pin: activePin}, SecretAction: "keep"})
+	if c2.OK || c2.Rejection != RejectMutationsPending {
+		t.Fatalf("concurrent pin-reuse configure = %+v, want mutations_pending", c2)
+	}
+	if e := h.mgr.Status().Epoch; e != baseEpoch {
+		t.Fatal("refused pin-reuse configure changed the epoch")
+	}
+
+	// Release T2: it commits, having resolved the active pin under
+	// exclusivity.
+	close(release)
+	if r := <-t2done; !r.OK {
+		t.Fatalf("T2 = %+v, want success with active-pin reuse", r)
+	}
+	if p := h.mgr.Profile(); p.TLSMode != TLSPin || p.PinFingerprint != activePin || p.PinCertPEM == "" {
+		t.Fatalf("post-commit pinned profile = %+v", p)
+	}
+
+	// A pin from a SUPERSEDED profile cannot be resurrected once the
+	// active profile moves on and the cache is empty: reusing the old
+	// pin is pin_unknown (truthful TOFU).
+	h.mgr.mu.Lock()
+	h.mgr.offered = map[string][]byte{}
+	h.mgr.mu.Unlock()
+	if cfg := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+		URL: ts.URL, TLSMode: TLSSystem}, SecretAction: "keep"}); !cfg.OK {
+		t.Fatalf("switch to system = %+v", cfg)
+	}
+	if cfg := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+		URL: ts.URL, TLSMode: TLSPin, Pin: fp}, SecretAction: "keep"}); cfg.OK || cfg.Rejection != RejectPinUnknown {
+		t.Fatalf("superseded-pin reuse = %+v, want pin_unknown", cfg)
+	}
 }
 
 // Overlapping Configure transactions serialize: whatever interleaving
@@ -519,3 +623,7 @@ func TestConcurrentConfiguresSerialize(t *testing.T) {
 		t.Fatalf("runtime (%s) diverged from the persisted commit (%s)", cur.URL, persisted.URL)
 	}
 }
+
+// errPostPersist is the deterministic post-persistence failure for
+// the sequential rollback test.
+var errPostPersist = errors.New("injected post-persistence failure")

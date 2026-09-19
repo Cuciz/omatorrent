@@ -229,6 +229,13 @@ func (f *Fake) SetSecret(secret []byte) {
 	f.Secret = append([]byte(nil), secret...)
 }
 
+// Counts snapshot the call counters atomically (test assertions).
+func (f *Fake) Counts() (gets, stores, deletes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.GetCalls, f.StoreCalls, f.DelCalls
+}
+
 // SetUnavailable toggles the unusable-store simulation atomically.
 func (f *Fake) SetUnavailable(v bool) {
 	f.mu.Lock()

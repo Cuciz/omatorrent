@@ -320,9 +320,12 @@ func (m *Manager) Test(ctx context.Context, p TestParams) TestResult {
 			Detail: "plain HTTP to a non-loopback host requires explicit acknowledgement"}
 	}
 
-	tlsOpts, pinFail := m.tlsOptions(p.TLSMode, p.Pin)
-	if pinFail != "" {
-		return TestResult{Status: StatusInvalidConfig, Detail: pinFail}
+	if err := validateTLSRequest(p.TLSMode, p.Pin); err != nil {
+		return TestResult{Status: StatusInvalidConfig, Detail: err.Error()}
+	}
+	tlsOpts, rerr := m.resolveTLSOptions(p.TLSMode, p.Pin)
+	if rerr != nil {
+		return TestResult{Status: StatusInvalidConfig, Detail: rerr.Error()}
 	}
 
 	fetcher, res := m.resolveSecret(ctx, p)
@@ -438,32 +441,52 @@ func (m *Manager) cacheOffered(fp string, der []byte) {
 	m.offeredIO = append(m.offeredIO, fp)
 }
 
-// tlsOptions assembles the adapter TLS options for an IPC-supplied
-// mode (system|pin). The file-only `ca` mode is not IPC-settable; pin
-// resolves its certificate from the offered cache or the active
-// profile's stored pin (fail: ""≠nil signals the rejection detail).
-func (m *Manager) tlsOptions(mode, pin string) (qbittorrent.TLSOptions, string) {
+// validateTLSRequest is the PURE request-shape check (no Manager
+// state): tls_mode token (system|pin — the file-only `ca` mode is not
+// IPC-settable) and pin syntax (64 lowercase hex, required iff pin
+// mode). It runs BEFORE exclusivity; state-dependent resolution is
+// resolveTLSOptions under exclusivity.
+func validateTLSRequest(mode, pin string) error {
 	switch mode {
 	case "", TLSSystem:
-		return qbittorrent.TLSOptions{Mode: qbittorrent.TLSSystem}, ""
+		return nil
+	case TLSPin:
+		if len(pin) != 64 {
+			return fmt.Errorf("pin must be 64 hex characters")
+		}
+		if _, err := decodeHex(pin); err != nil {
+			return fmt.Errorf("pin must be lowercase hex")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown TLS mode")
+	}
+}
+
+// resolveTLSOptions is the STATE-DEPENDENT half (offered-certificate
+// cache, active-pin reuse from the CURRENT profile) — it may only run
+// while this transaction holds the configure drain, so no transaction
+// can derive trust material from a superseded profile. An error means
+// the pin has no trusted certificate (pin_unknown).
+func (m *Manager) resolveTLSOptions(mode, pin string) (qbittorrent.TLSOptions, error) {
+	switch mode {
+	case "", TLSSystem:
+		return qbittorrent.TLSOptions{Mode: qbittorrent.TLSSystem}, nil
 	case TLSPin:
 		m.mu.Lock()
 		der, cached := m.offered[pin]
 		activePin := m.profile.PinFingerprint
 		activePEM := []byte(m.profile.PinCertPEM)
 		m.mu.Unlock()
-		if _, err := decodeHex(pin); err != nil || len(pin) != 64 {
-			return qbittorrent.TLSOptions{}, "pin must be 64 lowercase hex characters"
-		}
 		if cached {
-			return qbittorrent.TLSOptions{Mode: qbittorrent.TLSPin, Pin: pin, PinCertPEM: pemEncode(der)}, ""
+			return qbittorrent.TLSOptions{Mode: qbittorrent.TLSPin, Pin: pin, PinCertPEM: pemEncode(der)}, nil
 		}
-		if pin != "" && pin == activePin && len(activePEM) > 0 {
-			return qbittorrent.TLSOptions{Mode: qbittorrent.TLSPin, Pin: pin, PinCertPEM: activePEM}, ""
+		if pin == activePin && len(activePEM) > 0 {
+			return qbittorrent.TLSOptions{Mode: qbittorrent.TLSPin, Pin: pin, PinCertPEM: activePEM}, nil
 		}
-		return qbittorrent.TLSOptions{}, "pin fingerprint has no trusted certificate (run connection.test first)"
+		return qbittorrent.TLSOptions{}, fmt.Errorf("pin fingerprint has no trusted certificate (run connection.test first)")
 	default:
-		return qbittorrent.TLSOptions{}, fmt.Sprintf("unknown TLS mode %q", mode)
+		return qbittorrent.TLSOptions{}, fmt.Errorf("unknown TLS mode")
 	}
 }
 
@@ -522,6 +545,11 @@ type ConfigureResult struct {
 // mutations_pending while a mutation is in flight; a failed switch
 // after the file write rolls the file back to the previous profile.
 func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureResult {
+	// ============================================================
+	// PHASE A — PURE REQUEST VALIDATION (no Manager-state reads).
+	// Everything here depends only on the request itself, so it may
+	// run before exclusivity. Rejections here are fully inert.
+	// ============================================================
 	ep, err := ValidateURL(p.URL)
 	if err != nil {
 		return ConfigureResult{Rejection: RejectInvalidURL}
@@ -534,18 +562,99 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	default:
 		return ConfigureResult{Rejection: RejectInvalidURL}
 	}
-
-	// Build the next profile. TLS `ca` is file-only; over IPC only
-	// system/pin are expressible, so an existing ca_path is only
-	// preserved when the new mode is pin/system-neutral... the daemon
-	// writes exactly what the IPC surface selected.
-	tlsOpts, pinFail := m.tlsOptions(p.TLSMode, p.Pin)
-	if pinFail != "" {
-		if p.TLSMode == TLSPin {
-			return ConfigureResult{Rejection: RejectPinUnknown}
-		}
+	if p.SecretAction == "replace" && len(p.Password) == 0 {
 		return ConfigureResult{Rejection: RejectInvalidURL}
 	}
+	// TLS request shape only (token + pin syntax): NO state reads —
+	// state-dependent pin resolution happens under exclusivity below.
+	if err := validateTLSRequest(p.TLSMode, p.Pin); err != nil {
+		return ConfigureResult{Rejection: RejectInvalidURL}
+	}
+
+	// ============================================================
+	// PHASE B — EXCLUSIVITY. From here on this transaction owns the
+	// backend-switch drain: concurrent Configures are refused
+	// (mutations_pending) or run strictly after this one commits, and
+	// nothing may derive rollback or trust state from Manager state
+	// before this point. Every failure path releases the drain via
+	// the deferred guard; CommitSwap clears it on success.
+	// ============================================================
+	if err := m.mutator.BeginSwitch(); err != nil {
+		return ConfigureResult{Rejection: RejectMutationsPending}
+	}
+	drainHeld := true
+	defer func() {
+		if drainHeld {
+			m.mutator.AbortSwitch()
+		}
+	}()
+
+	// Snapshot/rollback bookkeeping: what this transaction captured and
+	// what it actually mutated — rollback runs only when there is
+	// something to undo (and never before anything changed).
+	var prevSecret []byte
+	var prevExists bool
+	var beforeBytes []byte
+	var beforeExisted bool
+	secretMutated := false
+	storeMutated := false
+	fail := func(code string) ConfigureResult {
+		if secretMutated {
+			m.rollbackSecret(prevSecret, prevExists)
+		}
+		if storeMutated {
+			m.rollbackStoreBytes(beforeBytes, beforeExisted)
+		}
+		return ConfigureResult{Rejection: code}
+	}
+
+	// ============================================================
+	// PHASE C — TRANSACTION SNAPSHOTS (under exclusivity).
+	// ============================================================
+
+	// Persisted profile as RAW BYTES: the exact rollback target, never
+	// a re-marshal. An unpersisted fallback restores to "no file". An
+	// unreadable-but-present store refuses the transaction: a rollback
+	// target that cannot be captured must not proceed.
+	beforeBytes, beforeExisted, err = readStoreRawFn(m.storePath)
+	if err != nil {
+		return ConfigureResult{Rejection: RejectStorageError}
+	}
+
+	sctx, cancel := context.WithTimeout(ctx, secretsOpBudget)
+	defer cancel()
+
+	// Secret snapshot: `keep` never touches the provider. `replace`/
+	// `delete` REQUIRE a recoverable previous-state snapshot BEFORE
+	// any mutation — a provider error is NEVER "no secret exists"; it
+	// rejects with zero changes (the drain releases via the defer).
+	switch p.SecretAction {
+	case "keep":
+		// no snapshot, no mutation, no rollback — ever
+	case "replace", "delete":
+		sec, exists, gerr := m.secrets.Get(sctx)
+		if gerr != nil {
+			return ConfigureResult{Rejection: RejectSecretsMissing}
+		}
+		prevSecret, prevExists = sec, exists
+		if prevSecret != nil {
+			defer secrets.Wipe(prevSecret)
+		}
+	}
+
+	// ============================================================
+	// PHASE D — STATE-DEPENDENT TLS RESOLUTION (under exclusivity):
+	// the offered-certificate cache and active-pin reuse read CURRENT
+	// Manager state, so they may only happen here.
+	// ============================================================
+	tlsOpts, rerr := m.resolveTLSOptions(p.TLSMode, p.Pin)
+	if rerr != nil {
+		return ConfigureResult{Rejection: RejectPinUnknown}
+	}
+
+	// ============================================================
+	// PHASE E — THE TRANSACTION.
+	// ============================================================
 	next := Profile{
 		URL:               ep.NormalizedURL,
 		Username:          p.Username,
@@ -560,94 +669,50 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 		next.TLSMode = TLSSystem
 	}
 
-	// TRANSACTION SNAPSHOT (external review round 2, blocker 2): the
-	// rollback target is the persisted state as it is RIGHT NOW,
-	// captured per transaction as RAW BYTES — never a long-lived prev
-	// field, never a re-marshal. A→B succeeding and then B→C failing
-	// must restore B exactly; an unpersisted fallback state restores to
-	// "no file". An unreadable-but-present store rejects up front: a
-	// transaction whose rollback target cannot be captured must not
-	// start.
-	beforeBytes, beforeExisted, err := ReadStoreRaw(m.storePath)
-	if err != nil {
-		return ConfigureResult{Rejection: RejectStorageError}
-	}
-
-	sctx, cancel := context.WithTimeout(ctx, secretsOpBudget)
-	defer cancel()
-
-	// SECRET SNAPSHOT (external review round 2, blocker 3): `keep`
-	// never touches the provider. `replace`/`delete` REQUIRE a
-	// recoverable previous-state snapshot BEFORE any mutation — a
-	// provider error is NEVER interpreted as "no secret exists"; it
-	// rejects the whole operation with no config/store/backend change.
-	var prevSecret []byte
-	var prevExists bool
-	needsSecretRollback := false
-	switch p.SecretAction {
-	case "keep":
-		// no snapshot, no mutation, no rollback — ever
-	case "replace", "delete":
-		sec, exists, err := m.secrets.Get(sctx)
-		if err != nil {
-			return ConfigureResult{Rejection: RejectSecretsMissing}
-		}
-		prevSecret, prevExists, needsSecretRollback = sec, exists, true
-		if prevSecret != nil {
-			defer secrets.Wipe(prevSecret)
-		}
-	}
-
-	// Mutation-retargeting guard: drain the mutator (refuses while in
-	// flight; rejects new registrations until the switch commits —
-	// security review F1: validation-snapshot and backend registration
-	// can never straddle the switch).
-	if err := m.mutator.BeginSwitch(); err != nil {
-		return ConfigureResult{Rejection: RejectMutationsPending}
-	}
-	fail := func(code string) ConfigureResult {
-		m.mutator.AbortSwitch()
-		if needsSecretRollback {
-			m.rollbackSecret(prevSecret, prevExists)
-		}
-		m.rollbackStoreBytes(beforeBytes, beforeExisted)
-		return ConfigureResult{Rejection: code}
-	}
-
-	// Secret intent (ADR-0008 §9): explicit keep/replace/delete.
+	// Secret intent (ADR-0008 §9). A failed Store/Delete is treated as
+	// atomic (nothing changed) — documented assumption; the provider
+	// either errored before persisting or the write is idempotent on
+	// retry, so no rollback runs for a failed mutation itself.
 	switch p.SecretAction {
 	case "replace":
-		if len(p.Password) == 0 {
-			m.mutator.AbortSwitch()
-			return ConfigureResult{Rejection: RejectInvalidURL}
-		}
-		if err := m.secrets.Store(sctx, p.Password); err != nil {
-			m.mutator.AbortSwitch()
+		if serr := m.secrets.Store(sctx, p.Password); serr != nil {
 			return ConfigureResult{Rejection: RejectSecretsMissing}
 		}
 		secrets.Wipe(p.Password)
+		secretMutated = true
 	case "delete":
-		if err := m.secrets.Delete(sctx); err != nil {
-			m.mutator.AbortSwitch()
+		if derr := m.secrets.Delete(sctx); derr != nil {
 			return ConfigureResult{Rejection: RejectSecretsMissing}
 		}
+		secretMutated = true
 	}
 
 	// Persist: the epoch switch references what is on disk.
-	if err := SaveStore(m.storePath, next); err != nil {
+	if werr := SaveStore(m.storePath, next); werr != nil {
 		return fail(RejectStorageError)
 	}
+	storeMutated = true
 
-	client, err := m.buildClient(next, ep)
-	if err != nil {
+	// Test-only injection point (nil in production): lets regression
+	// tests fail a transaction deterministically AFTER persistence so
+	// the rollback paths (secret + raw store restore) actually execute
+	// — an at-persistence collision would block the rollback write too.
+	if buildFailureHook != nil {
+		if herr := buildFailureHook(next); herr != nil {
+			return fail(RejectInvalidURL)
+		}
+	}
+	client, berr := m.buildClient(next, ep)
+	if berr != nil {
 		return fail(RejectInvalidURL)
 	}
 
 	// Atomic activation: syncer first (its state immediately degrades —
 	// any straddling submission validates against degraded state and is
-	// refused), then the mutator swap commits the drain.
+	// refused), then the mutator swap commits and releases the drain.
 	m.syncer.SwitchBackend(client)
 	m.mutator.CommitSwap(client)
+	drainHeld = false
 
 	m.mu.Lock()
 	oldClient := m.current
@@ -660,7 +725,7 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	case "delete":
 		m.hasSecret = false
 	}
-	epoch, hadSecret := m.epoch, m.hasSecret
+	epoch := m.epoch
 	m.mu.Unlock()
 
 	// Best-effort logout on the superseded backend (ADR-0008 §6):
@@ -673,7 +738,6 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 			c.Logout(lctx)
 		}(oldClient)
 	}
-	_ = hadSecret
 
 	m.log.Info("connection configured", "host", ep.Host, "transport", ep.Scheme, "tls", next.TLSMode, "epoch", epoch)
 	mode := "remote"
@@ -682,6 +746,14 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 	}
 	return ConfigureResult{OK: true, Epoch: epoch, Mode: mode, Host: truncateRunes(ep.Host, 128), Transport: ep.Scheme}
 }
+
+// readStoreRawFn indirection for Configure (spies in concurrency
+// tests prove the losing transaction never snapshots).
+var readStoreRawFn = ReadStoreRaw
+
+// buildFailureHook is a test-only seam (nil in production) that can
+// fail a Configure transaction after its persistence step.
+var buildFailureHook func(next Profile) error
 
 // rollbackSecret restores the exact previous secret PRESENCE and
 // VALUE after a failed replace/delete configuration (best effort;

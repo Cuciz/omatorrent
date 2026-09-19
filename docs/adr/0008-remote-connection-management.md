@@ -240,24 +240,39 @@ list extended.
   refused without backend contact) so a retry loop cannot walk into
   qBittorrent's IP ban (security review finding 4).
 
-  Transactional activation (external review round 2, blockers 2+3):
-  every Configure transaction snapshots its rollback targets LOCALLY
-  at start — the persisted profile as RAW BYTES (exact restore, never
-  a re-marshal; an unpersisted fallback restores to "no file"; an
-  unreadable-but-present store refuses the transaction up front) and,
-  for `replace`/`delete`, the previous secret's exact presence/value.
-  `keep` never touches the provider and never participates in secret
-  rollback. A `replace`/`delete` whose previous-state snapshot cannot
-  be read is rejected (`secrets_unavailable`) BEFORE any mutation — a
-  provider error is never interpreted as "no secret exists". On any
-  post-snapshot failure the transaction restores exactly what was
-  snapshotted: the currently active state, never a stale earlier one
-  (A→B succeeding then B→C failing restores B — regression-pinned
-  including the restart path). If a restoration itself fails, the
-  original rejection code is returned and the failure is logged with a
-  classified, secret-free message; the mismatch then surfaces
-  truthfully through the connection status (documented decision: no
-  separate IPC rollback-failure code).
+  Transactional activation (external review round 2, blockers 2+3,
+  corrected under the final concurrency review): a Configure
+  transaction runs in strictly ordered phases — (1) PURE request
+  validation (URL, HTTP policy, enums, TLS token and pin SYNTAX only —
+  no Manager-state reads; rejections here are fully inert); (2)
+  `BeginSwitch` exclusivity with a deferred drain-release guard on
+  every failure path; (3) the rollback snapshots, taken ONLY under
+  that exclusivity: the persisted profile as RAW BYTES (exact restore,
+  never a re-marshal; an unpersisted fallback restores to "no file";
+  an unreadable-but-present store refuses the transaction) and, for
+  `replace`/`delete`, the previous secret's exact presence/value
+  (`keep` never touches the provider and never participates in secret
+  rollback; a snapshot that cannot be read rejects
+  `secrets_unavailable` BEFORE any mutation — a provider error is
+  never "no secret exists"); (4) state-DEPENDENT TLS resolution
+  (offered-certificate cache, active-pin reuse) — only under
+  exclusivity, so no transaction can derive trust material from a
+  superseded profile; (5) the mutation itself with
+  `secretMutated`/`storeMutated` tracking — rollback restores ONLY
+  what actually mutated (a failed Store/Delete is treated as atomic);
+  (6) syncer switch, mutator `CommitSwap` (clears the drain), Manager
+  state/epoch update, best-effort old-client logout. Concurrent
+  Configures serialize on the drain: the loser is refused
+  (`mutations_pending`) and observationally inert (no snapshot, no
+  provider call, no store/epoch change). A committed activation can
+  therefore never be rolled back by a later failing transaction —
+  proven by a deterministic channel-synchronized regression that
+  FAILS on the pre-correction ordering (recorded in
+  docs/agent/PHASE05.md) and passes on this one. If a restoration
+  itself fails, the original rejection code is returned and the
+  failure is logged with a classified, secret-free message; the
+  mismatch then surfaces truthfully through the connection status
+  (documented decision: no separate IPC rollback-failure code).
 
 Compatibility: no existing message shape gains a field; clients that
 never send `connection.*` see no difference. The protocol stays
