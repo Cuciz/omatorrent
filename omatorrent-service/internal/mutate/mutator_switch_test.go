@@ -158,3 +158,44 @@ func stateWithTorrent(hash string) state.State {
 func quietLog() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 var _ = qbittorrent.ErrConflict // import parity
+
+// During a drain (BeginSwitch..Commit) new submissions are refused:
+// the switch cannot straddle a mutation's validation and registration
+// (security review F1).
+func TestDrainRejectsNewSubmissions(t *testing.T) {
+	var calls []string
+	a := &recordingBackend{name: "A", calls: &calls}
+	src := &staticSource{st: stateWithTorrent(hashA)}
+	m := New(a, src, Options{ReconcileWindow: time.Hour}, quietLog())
+
+	if err := m.BeginSwitch(); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	got := m.Submit(Request{Action: Pause, Hash: hashA, Ref: "r-drain"})
+	if got.Outcome != CodeBusy {
+		t.Fatalf("submit during drain = %+v, want busy", got)
+	}
+	if m.InFlight() != 0 {
+		t.Fatal("drained submission registered anyway")
+	}
+	m.CommitSwap(a)
+	got = m.Submit(Request{Action: Pause, Hash: hashA, Ref: "r-after"})
+	if got.Outcome != OutcomeAccepted {
+		t.Fatalf("submit after commit = %+v", got)
+	}
+}
+
+// AbortSwitch releases the drain without swapping.
+func TestAbortSwitchReleasesDrain(t *testing.T) {
+	var calls []string
+	a := &recordingBackend{name: "A", calls: &calls}
+	src := &staticSource{st: stateWithTorrent(hashA)}
+	m := New(a, src, Options{}, quietLog())
+	if err := m.BeginSwitch(); err != nil {
+		t.Fatal(err)
+	}
+	m.AbortSwitch()
+	if got := m.Submit(Request{Action: Pause, Hash: hashA, Ref: "r1"}); got.Outcome != OutcomeAccepted {
+		t.Fatalf("submit after abort = %+v", got)
+	}
+}

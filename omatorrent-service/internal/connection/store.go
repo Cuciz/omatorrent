@@ -38,6 +38,13 @@ func DefaultStorePath() (string, error) {
 // unreadable, permissive, symlinked, oversized, malformed or semantically
 // invalid IS an error — the daemon fails closed, it never repairs.
 func LoadStore(path string) (Profile, bool, error) {
+	// Refuse symlinked path components above the profile too (the
+	// write side refuses them via ensurePrivateDir; the read side must
+	// not silently follow a redirected directory — security review F7).
+	if err := refuseSymlinkedDir(filepath.Dir(path)); err != nil {
+		return Profile{}, true, err
+	}
+
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -137,12 +144,30 @@ func SaveStore(path string, p Profile) error {
 	return nil
 }
 
+// refuseSymlinkedDir walks every component of dir and refuses if any
+// is a symlink (the file itself is separately O_NOFOLLOW-guarded).
+func refuseSymlinkedDir(dir string) error {
+	components := strings.Split(strings.Trim(filepath.Clean(dir), string(os.PathSeparator)), string(os.PathSeparator))
+	cur := string(os.PathSeparator)
+	for _, c := range components {
+		if c == "" {
+			continue
+		}
+		cur = filepath.Join(cur, c)
+		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("connection: refusing symlinked path component %s", cur)
+		}
+	}
+	return nil
+}
+
 // ensurePrivateDir validates the profile directory: every component
 // from the config root down must be symlink-free; the final component
 // is created 0700 when missing and must be 0700, UID-owned and a real
 // directory when present (never repaired).
 func ensurePrivateDir(dir string) error {
-	root := configRoot(dir) // e.g. ~/.config — validated for symlinks only
+	root := configRoot(dir) // e.g. ~/.config — must exist; symlinked
+	// components BELOW it are refused by the walk above
 	components := strings.Split(strings.TrimPrefix(dir, root), string(os.PathSeparator))
 	cur := root
 	for _, c := range components {

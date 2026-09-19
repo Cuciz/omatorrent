@@ -232,11 +232,13 @@ func (s *Syncer) SwitchBackend(b Backend) {
 	next.LastError = StatusLoading
 	next.Generation++
 	s.cur = next
+	// Removals publish under s.mu together with the state replacement
+	// (ordering vs in-flight cycle deltas — security review F3).
+	if len(removed) > 0 {
+		s.publishLocked(Change{Seq: next.Generation, Changed: nil, Removed: removed})
+	}
 	s.mu.Unlock()
 
-	if len(removed) > 0 {
-		s.publish(Change{Seq: next.Generation, Changed: nil, Removed: removed})
-	}
 	select {
 	case s.kick <- struct{}{}:
 	default:
@@ -395,7 +397,7 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 
 	md, err := backend.SyncMaindata(cctx, rid)
 	if err != nil {
-		class = errClass(err)
+		class = s.noteAuthFailure(err) // counts mid-session re-login rejects too (review F5)
 		s.commitDegradedEpoch(epoch, err)
 		return false
 	}
@@ -506,11 +508,14 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 	}
 	s.cur = next
 	s.rid = md.RID
-	s.mu.Unlock()
-
+	// Publish UNDER s.mu (non-blocking sends): a concurrent
+	// SwitchBackend — which also publishes under s.mu — can never
+	// reorder around this delta and resurrect old-backend rows in a
+	// subscriber's view after the switch's removals (security review F3).
 	if len(changed) > 0 || len(removed) > 0 || !prev.BackendOK {
-		s.publish(Change{Seq: next.Generation, Changed: changed, Removed: removed})
+		s.publishLocked(Change{Seq: next.Generation, Changed: changed, Removed: removed})
 	}
+	s.mu.Unlock()
 	return true
 }
 
@@ -580,6 +585,19 @@ func (s *Syncer) commitDegradedEpoch(epoch uint64, err error) {
 func (s *Syncer) publish(ch Change) {
 	s.subsMu.Lock()
 	defer s.subsMu.Unlock()
+	s.publishToSubs(ch)
+}
+
+// publishLocked is publish for callers already holding s.mu (the
+// non-blocking sends keep the lock section short; lock order
+// s.mu -> subsMu matches Subscribe).
+func (s *Syncer) publishLocked(ch Change) {
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	s.publishToSubs(ch)
+}
+
+func (s *Syncer) publishToSubs(ch Change) {
 	for c := range s.subs {
 		select {
 		case c <- ch:

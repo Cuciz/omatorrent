@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ type qbFixture struct {
 	apiVersion   string  // served app/webapiVersion
 	maindataErr  int     // respond 403 to the next N maindata calls
 	loginFail    bool    // login answers 401 (5.2 contract)
+	logouts      int     // /api/v2/auth/logout calls received
 	maindataRIDs []int64 // rids received (cookie/session evidence)
 }
 
@@ -65,6 +67,10 @@ func (f *qbFixture) handler() http.Handler {
 			return
 		case "/api/v2/app/webapiVersion":
 			fmt.Fprint(w, f.apiVersion)
+			return
+		case "/api/v2/auth/logout":
+			f.logouts++
+			w.WriteHeader(http.StatusNoContent)
 			return
 		case "/api/v2/torrents/stop", "/api/v2/torrents/start", "/api/v2/torrents/pause", "/api/v2/torrents/resume", "/api/v2/torrents/delete", "/api/v2/torrents/add":
 			w.WriteHeader(http.StatusOK)
@@ -124,6 +130,7 @@ func newHarness(t *testing.T, fallback Profile, initial ClientBuilder) *harness 
 	if err != nil {
 		t.Fatal(err)
 	}
+	mgr.testPace = 0 // tests run credentialed probes back-to-back
 	return &harness{t: t, store: store, prov: prov, syncer: syncer, mutator: mutator, mgr: mgr}
 }
 
@@ -681,6 +688,12 @@ func (f *qbFixture) expireSessionOnce() {
 	f.mu.Unlock()
 }
 
+func (f *qbFixture) logoutCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logouts
+}
+
 func (f *qbFixture) firstRID() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -846,4 +859,84 @@ func mustClientB(b *testing.B, p Profile, prov secrets.Provider) *qbittorrent.Cl
 
 func profilePathB(b *testing.B) string {
 	return filepath.Join(b.TempDir(), "omatorrent", "connection.json")
+}
+
+// Credential-bearing tests are paced: a second login-carrying test
+// within the window is refused WITHOUT any backend contact (ban
+// frugality for the settings surface, security review F4).
+func TestConnectionTestLoginPacing(t *testing.T) {
+	fx := &qbFixture{torrents: 0, appVersion: "v5.2.3", apiVersion: "2.15.1",
+		username: "u", password: "pw", requireAuth: true}
+	ts := httptest.NewServer(fx.handler())
+	defer ts.Close()
+	h := newHarness(t, localProfile(ts.URL), func() (*qbittorrent.Client, error) {
+		return qbittorrent.New(ts.URL, "", "")
+	})
+	h.mgr.testPace = time.Hour // deterministic: window never elapses
+	first := h.mgr.Test(ctx(), TestParams{URL: ts.URL, Username: "u", Password: []byte("pw"), TLSMode: TLSSystem})
+	if !first.OK {
+		t.Fatalf("first test = %+v", first)
+	}
+	before := fx.sessionCount()
+	second := h.mgr.Test(ctx(), TestParams{URL: ts.URL, Username: "u", Password: []byte("pw"), TLSMode: TLSSystem})
+	if second.OK || second.Status != StatusAuthRequired || !strings.Contains(second.Detail, "throttled") {
+		t.Fatalf("second test = %+v, want throttled refusal", second)
+	}
+	if fx.sessionCount() != before {
+		t.Fatal("throttled test still contacted the backend")
+	}
+}
+
+// A backend switch best-effort LOGS OUT the superseded session
+// (ADR-0008 par.6): the fixture records /api/v2/auth/logout calls.
+func TestSwitchLogsOutOldSession(t *testing.T) {
+	fx := &qbFixture{torrents: 1, appVersion: "v5.2.3", apiVersion: "2.15.1",
+		username: "u", password: "pw", requireAuth: true}
+	ts := httptest.NewServer(fx.handler())
+	defer ts.Close()
+
+	var initial *qbittorrent.Client
+	var err error
+	h := newHarness(t, localProfile(ts.URL), func() (*qbittorrent.Client, error) {
+		initial, err = qbittorrent.New(ts.URL, "u", "pw")
+		return initial, err
+	})
+	if err != nil && initial == nil {
+		t.Fatal(err)
+	}
+	// The harness's syncer runs on the initial client; log in once so a
+	// real session exists, then attach the client for switch bookkeeping.
+	if err := initial.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h.mgr.AttachClient(initial)
+	if got := fx.logoutCount(); got != 0 {
+		t.Fatalf("logouts before switch = %d", got)
+	}
+	if cfg := h.mgr.Configure(ctx(), ConfigureParams{TestParams: TestParams{
+		URL: ts.URL, Username: "u", Password: []byte("pw"), TLSMode: TLSSystem}, SecretAction: "replace"}); !cfg.OK {
+		t.Fatalf("configure = %+v", cfg)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for fx.logoutCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := fx.logoutCount(); got != 1 {
+		t.Fatalf("logouts after switch = %d, want 1 (best-effort old-session logout)", got)
+	}
+}
+
+// The read path refuses a profile reached through a symlinked DIRECTORY
+// (the write side already did; security review F7).
+func TestStoreRejectsSymlinkedDirectoryRead(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "omatorrent-real")
+	os.MkdirAll(real, 0o700)
+	writeProfile(t, filepath.Join(real, "connection.json"),
+		`{"url":"http://127.0.0.1:8080","tls_mode":"system"}`, 0o600)
+	link := filepath.Join(dir, "omatorrent")
+	os.Symlink(real, link)
+	if _, _, err := LoadStore(filepath.Join(link, "connection.json")); err == nil {
+		t.Fatal("profile read through a symlinked directory accepted")
+	}
 }

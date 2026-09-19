@@ -135,7 +135,7 @@ func BuildTLSConfig(o TLSOptions) (*tls.Config, error) {
 			},
 		}, nil
 	default:
-		return nil, fmt.Errorf("qbittorrent: unknown TLS mode %q", o.Mode)
+		return nil, fmt.Errorf("qbittorrent: unknown TLS mode")
 	}
 }
 
@@ -230,7 +230,7 @@ func NewConfigurable(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("qbittorrent: credentials in the URL are not supported; use the secret provider")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("qbittorrent: unsupported base URL scheme %q (http/https only)", u.Scheme)
+		return nil, fmt.Errorf("qbittorrent: unsupported base URL scheme (http/https only)")
 	}
 	tlsConf, err := BuildTLSConfig(cfg.TLS)
 	if err != nil {

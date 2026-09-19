@@ -776,8 +776,12 @@ Panel {
               anchors.fill: parent
               cursorShape: Qt.PointingHandCursor
               onClicked: {
-                if (root.settingsOpen) root.settingsOpen = false
-                else root.openSettings()
+                if (root.settingsOpen) {
+                  root.settingsOpen = false
+                  root.passText = "" // abandoned forms must not retain secrets
+                } else {
+                  root.openSettings()
+                }
               }
             }
           }

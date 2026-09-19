@@ -67,7 +67,7 @@ func ValidateURL(raw string) (Endpoint, error) {
 			return ep, fmt.Errorf("control characters in URL")
 		}
 		if r == 0x20 || r == '\\' {
-			return ep, fmt.Errorf("unsupported character %q in URL", r)
+			return ep, fmt.Errorf("unsupported character in URL")
 		}
 	}
 	u, err := url.Parse(raw)
@@ -80,7 +80,7 @@ func ValidateURL(raw string) (Endpoint, error) {
 	switch u.Scheme {
 	case "http", "https":
 	default:
-		return ep, fmt.Errorf("unsupported scheme %q (http/https only)", u.Scheme)
+		return ep, fmt.Errorf("unsupported URL scheme (http/https only)")
 	}
 	if u.Host == "" {
 		return ep, fmt.Errorf("empty host")
@@ -217,7 +217,7 @@ func (p Profile) Validate() (Endpoint, error) {
 			return Endpoint{}, fmt.Errorf("TLS mode %q requires pin_cert_pem", TLSPin)
 		}
 	default:
-		return Endpoint{}, fmt.Errorf("unknown TLS mode %q", p.TLSMode)
+		return Endpoint{}, fmt.Errorf("unknown TLS mode")
 	}
 	return ValidateURL(p.URL)
 }

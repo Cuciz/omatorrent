@@ -77,6 +77,7 @@ func run(log *slog.Logger, configPath, socketOverride, connectionPath string) er
 	if err != nil {
 		return err
 	}
+	manager.AttachClient(qbt) // switch bookkeeping (best-effort logout)
 
 	socketPath, err := ipc.ResolveSocketPath(cfg.IPC.SocketPath)
 	if err != nil {

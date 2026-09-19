@@ -49,6 +49,9 @@ const (
 // Test budget (docs/IPC.md: bounded inline network work).
 const TestBudget = 8 * time.Second
 
+// testLoginWindow paces credential-bearing connection.test logins.
+const testLoginWindow = 5 * time.Second
+
 // offeredCacheCap bounds the fingerprint→DER cache of certificates
 // offered during failed handshakes (memory-bounded trust-off flow).
 const offeredCacheCap = 8
@@ -63,9 +66,14 @@ type SyncSwitcher interface {
 	SwitchBackend(b state.Backend)
 }
 
-// MutationSwitcher is the mutator's guarded epoch-switch entry point.
+// MutationSwitcher is the mutator's guarded epoch-switch entry point:
+// BeginSwitch drains (refusing while mutations are in flight and
+// rejecting new registrations), CommitSwap/AbortSwitch finish it.
 type MutationSwitcher interface {
-	SwitchBackend(b mutate.Backend) error // refuses while mutations are in flight
+	BeginSwitch() error
+	CommitSwap(b mutate.Backend)
+	AbortSwitch()
+	SwitchBackend(b mutate.Backend) error // one-shot variant (tests)
 	InFlight() int
 }
 
@@ -85,8 +93,14 @@ type Manager struct {
 	epoch     uint64
 	valid     bool // profile loaded/validated (false = invalid_configuration)
 	hasSecret bool
-	offered   map[string][]byte
-	offeredIO []string // insertion order for the bounded cache
+	current   *qbittorrent.Client // active adapter (logout-on-switch)
+	// testLoginAt paces credential-bearing connection.test logins
+	// (ban frugality for the settings surface — security review F4);
+	// testPace is the window (tests may zero it).
+	testLoginAt time.Time
+	testPace    time.Duration
+	offered     map[string][]byte
+	offeredIO   []string // insertion order for the bounded cache
 	// prevProfile is the last successfully activated profile (rollback
 	// reference if a switch fails after the file write).
 	prevProfile Profile
@@ -132,6 +146,7 @@ func NewManager(storePath string, fallback Profile, prov secrets.Provider, state
 		mutator:   mutator,
 		log:       log,
 		offered:   map[string][]byte{},
+		testPace:  testLoginWindow,
 	}
 	p, ep, err := LoadActive(storePath, fallback)
 	if err != nil {
@@ -163,6 +178,14 @@ func (m *Manager) refreshSecretPresence() {
 }
 
 const secretsOpBudget = 6 * time.Second
+
+// AttachClient registers the startup adapter (built by main via
+// BuildClient) so later switches can best-effort-logout it.
+func (m *Manager) AttachClient(c *qbittorrent.Client) {
+	m.mu.Lock()
+	m.current = c
+	m.mu.Unlock()
+}
 
 // Profile returns the active profile (non-secret fields only).
 func (m *Manager) Profile() Profile {
@@ -303,6 +326,23 @@ func (m *Manager) Test(ctx context.Context, p TestParams) TestResult {
 		res.Host, res.Transport = truncateRunes(ep.Host, 128), ep.Scheme
 		return res
 	}
+	// Ban frugality for the settings surface (security review F4): a
+	// credential-bearing test performs a REAL login; pace them so a
+	// retry loop (UI bug or hostile client) cannot walk into
+	// qBittorrent's 5-attempt IP ban. One per window; excess is refused
+	// without any backend contact.
+	if p.Username != "" && fetcher != nil {
+		m.mu.Lock()
+		waiting := m.testPace > 0 && time.Since(m.testLoginAt) < m.testPace
+		m.mu.Unlock()
+		if waiting {
+			return TestResult{Status: StatusAuthRequired, Host: truncateRunes(ep.Host, 128), Transport: ep.Scheme,
+				Detail: "login attempts throttled — try again in a few seconds"}
+		}
+		m.mu.Lock()
+		m.testLoginAt = time.Now()
+		m.mu.Unlock()
+	}
 
 	client, err := qbittorrent.NewConfigurable(qbittorrent.ClientConfig{
 		BaseURL: ep.NormalizedURL, Username: p.Username,
@@ -371,8 +411,12 @@ func (m *Manager) classifyTestErr(err error, ep Endpoint) TestResult {
 	}
 }
 
+// offeredDERCap bounds one cached certificate (defense in depth against
+// pathological chains; Go's handshake records are far smaller).
+const offeredDERCap = 64 << 10
+
 func (m *Manager) cacheOffered(fp string, der []byte) {
-	if fp == "" || len(der) == 0 {
+	if fp == "" || len(der) == 0 || len(der) > offeredDERCap {
 		return
 	}
 	m.mu.Lock()
@@ -431,6 +475,12 @@ func (m *Manager) resolveSecret(ctx context.Context, p TestParams) (func(context
 			return cp, nil
 		}, TestResult{}
 	case p.UseStoredPassword:
+		// Only meaningful with a username (no login happens without
+		// one); skip the store round-trip and the retained copy
+		// otherwise (security review F9).
+		if p.Username == "" {
+			return nil, TestResult{}
+		}
 		secret, ok, err := m.secrets.Get(ctx)
 		if err != nil {
 			return nil, TestResult{Status: StatusSecretsUnavailable, Detail: "secret store unavailable or locked"}
@@ -438,6 +488,7 @@ func (m *Manager) resolveSecret(ctx context.Context, p TestParams) (func(context
 		if !ok {
 			return nil, TestResult{Status: StatusAuthRequired, Detail: "no stored credentials"}
 		}
+		defer secrets.Wipe(secret)
 		return func(context.Context) ([]byte, error) {
 			return append([]byte(nil), secret...), nil
 		}, TestResult{}
@@ -505,53 +556,90 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 		next.TLSMode = TLSSystem
 	}
 
-	// Mutation-retargeting guard FIRST: no half-applied switch under a
-	// concurrent submission.
-	if m.mutator.InFlight() > 0 {
+	// Snapshot the previous secret so any later failure can roll the
+	// credential state back (security review F2).
+	sctx, cancel := context.WithTimeout(ctx, secretsOpBudget)
+	defer cancel()
+	prevSecret, prevExists, _ := m.secrets.Get(sctx)
+	if prevSecret != nil {
+		defer secrets.Wipe(prevSecret)
+	}
+
+	// Mutation-retargeting guard: drain the mutator (refuses while in
+	// flight; rejects new registrations until the switch commits —
+	// security review F1: validation-snapshot and backend registration
+	// can never straddle the switch).
+	if err := m.mutator.BeginSwitch(); err != nil {
 		return ConfigureResult{Rejection: RejectMutationsPending}
+	}
+	fail := func(code string) ConfigureResult {
+		m.mutator.AbortSwitch()
+		m.rollbackSecret(prevSecret, prevExists)
+		m.rollbackStore()
+		return ConfigureResult{Rejection: code}
 	}
 
 	// Secret intent (ADR-0008 §9): explicit keep/replace/delete.
-	sctx, cancel := context.WithTimeout(ctx, secretsOpBudget)
-	defer cancel()
 	switch p.SecretAction {
 	case "replace":
 		if len(p.Password) == 0 {
+			m.mutator.AbortSwitch()
 			return ConfigureResult{Rejection: RejectInvalidURL}
 		}
 		if err := m.secrets.Store(sctx, p.Password); err != nil {
+			m.mutator.AbortSwitch()
 			return ConfigureResult{Rejection: RejectSecretsMissing}
 		}
 		secrets.Wipe(p.Password)
 	case "delete":
 		if err := m.secrets.Delete(sctx); err != nil {
+			m.mutator.AbortSwitch()
 			return ConfigureResult{Rejection: RejectSecretsMissing}
 		}
 	}
 
-	// Persist first: the epoch switch references what is on disk.
+	// Persist: the epoch switch references what is on disk.
 	if err := SaveStore(m.storePath, next); err != nil {
-		return ConfigureResult{Rejection: RejectStorageError}
+		return fail(RejectStorageError)
 	}
 
 	client, err := m.buildClient(next, ep)
 	if err != nil {
-		m.rollbackStore()
-		return ConfigureResult{Rejection: RejectInvalidURL}
+		return fail(RejectInvalidURL)
 	}
-	if err := m.mutator.SwitchBackend(client); err != nil {
-		m.rollbackStore()
-		return ConfigureResult{Rejection: RejectMutationsPending}
-	}
+
+	// Atomic activation: syncer first (its state immediately degrades —
+	// any straddling submission validates against degraded state and is
+	// refused), then the mutator swap commits the drain.
 	m.syncer.SwitchBackend(client)
+	m.mutator.CommitSwap(client)
 
 	m.mu.Lock()
+	oldClient := m.current
+	m.current = client
 	m.prevProfile, m.prevValid = m.profile, m.valid
 	m.profile, m.endpoint, m.valid = next, ep, true
 	m.epoch++
-	m.hasSecret = p.SecretAction == "replace" || (p.SecretAction == "keep" && m.hasSecret)
-	epoch := m.epoch
+	switch p.SecretAction {
+	case "replace":
+		m.hasSecret = true
+	case "delete":
+		m.hasSecret = false
+	}
+	epoch, hadSecret := m.epoch, m.hasSecret
 	m.mu.Unlock()
+
+	// Best-effort logout on the superseded backend (ADR-0008 §6):
+	// expires the old session server-side; no credentials in the
+	// request; result ignored; never blocks the switch.
+	if oldClient != nil {
+		go func(c *qbittorrent.Client) {
+			lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer lcancel()
+			c.Logout(lctx)
+		}(oldClient)
+	}
+	_ = hadSecret
 
 	m.log.Info("connection configured", "host", ep.Host, "transport", ep.Scheme, "tls", next.TLSMode, "epoch", epoch)
 	mode := "remote"
@@ -559,6 +647,31 @@ func (m *Manager) Configure(ctx context.Context, p ConfigureParams) ConfigureRes
 		mode = "local"
 	}
 	return ConfigureResult{OK: true, Epoch: epoch, Mode: mode, Host: truncateRunes(ep.Host, 128), Transport: ep.Scheme}
+}
+
+// rollbackSecret restores the previous secret after a failed
+// configuration (best effort; security review F2).
+func (m *Manager) rollbackSecret(prev []byte, exists bool) {
+	sctx, cancel := context.WithTimeout(context.Background(), secretsOpBudget)
+	defer cancel()
+	switch {
+	case exists && prev != nil:
+		if err := m.secrets.Store(sctx, prev); err != nil {
+			m.log.Error("secret rollback failed", "error", "provider error")
+			return
+		}
+		m.mu.Lock()
+		m.hasSecret = true
+		m.mu.Unlock()
+	case !exists:
+		if err := m.secrets.Delete(sctx); err != nil {
+			m.log.Error("secret rollback failed", "error", "provider error")
+			return
+		}
+		m.mu.Lock()
+		m.hasSecret = false
+		m.mu.Unlock()
+	}
 }
 
 // rollbackStore restores the previously activated profile file after a

@@ -141,6 +141,11 @@ type Mutator struct {
 	// (ambiguous), never as a confirmation against the wrong backend.
 	backend Backend
 	epoch   uint64
+	// draining is set by BeginSwitch: new submissions are refused
+	// (CodeBusy) until CommitSwitch/AbortSwitch, so a backend switch
+	// can never interleave with a mutation registration (the
+	// validation-snapshot/registration race, security review F1).
+	draining bool
 
 	mu       sync.Mutex
 	nextMut  uint64
@@ -212,18 +217,47 @@ func New(backend Backend, src StateSource, opts Options, log *slog.Logger) *Muta
 	}
 }
 
-// SwitchBackend swaps the adapter under the mutation lock, refusing
-// while any mutation is in flight (mutation retargeting guard,
-// ADR-0008 §8). The epoch bump orphans any pending registered for the
-// previous backend; reconcile settles those as timeout (ambiguous).
-func (m *Mutator) SwitchBackend(b Backend) error {
+// BeginSwitch starts a drain: refuses while any mutation is in flight
+// and rejects NEW submissions until the switch commits or aborts, so
+// validation-against-old-state + registration-on-new-backend can never
+// interleave (security review F1; ADR-0008 §8).
+func (m *Mutator) BeginSwitch() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.draining {
+		return fmt.Errorf("mutate: switch already in progress")
+	}
 	if len(m.inflight) > 0 {
 		return fmt.Errorf("mutate: refusing backend switch with %d mutations in flight", len(m.inflight))
 	}
+	m.draining = true
+	return nil
+}
+
+// CommitSwap finishes a begun switch: swaps the backend and bumps the
+// epoch. Callers must have passed BeginSwitch.
+func (m *Mutator) CommitSwap(b Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.draining = false
 	m.backend = b
 	m.epoch++
+}
+
+// AbortSwitch releases the drain without swapping (rollback path).
+func (m *Mutator) AbortSwitch() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.draining = false
+}
+
+// SwitchBackend is the one-shot variant (tests): refuse-while-in-flight
+// plus swap, atomically under the mutation lock.
+func (m *Mutator) SwitchBackend(b Backend) error {
+	if err := m.BeginSwitch(); err != nil {
+		return err
+	}
+	m.CommitSwap(b)
 	return nil
 }
 
@@ -350,6 +384,13 @@ func (m *Mutator) Submit(req Request) Stage1 {
 		hash = wantHash
 	}
 	m.mu.Lock()
+	if m.draining {
+		// A backend switch is draining registrations: the committed
+		// state this request validated against may be about to be
+		// replaced — refuse rather than risk cross-backend execution.
+		m.mu.Unlock()
+		return Stage1{Outcome: CodeBusy}
+	}
 	if s1, ok := m.lookupRefLocked(req); ok {
 		m.mu.Unlock()
 		return s1
