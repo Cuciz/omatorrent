@@ -1,6 +1,6 @@
-# OmaTorrent — Testing & Evidence
+# Sprout — Testing & Evidence
 
-Status: PHASE 0.5 — suites exist and were executed (evidence in
+Status: PHASE 0.5.1 — suites exist and were executed (evidence in
 docs/agent/PHASE0..PHASE05.md). Evidence rules used by /ot-verify, the
 omatorrent-verification skill, and the qa-release agent.
 

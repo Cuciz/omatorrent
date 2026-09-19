@@ -1,11 +1,13 @@
-# AGENTS.md — OmaTorrent
+# AGENTS.md — Sprout (OmaTorrent)
 
-OmaTorrent is a native Omarchy torrent-control experience: a bar widget with
-compact transfer state, a daily-use panel, and an administration dashboard.
-Its engine is **qBittorrent** (via the WebUI API); Omarchy Quattro/Quickshell
-is the presentation layer.
+Sprout (public name since Phase 0.5.1 — see docs/BRAND.md; internal
+technical identifiers keep the `omatorrent` working name) is a native
+Omarchy torrent-control experience: a bar widget with compact transfer
+state, a daily-use panel, and an administration dashboard. Its engine is
+**qBittorrent** (via the WebUI API); Omarchy Quattro/Quickshell is the
+presentation layer.
 
-OmaTorrent is **not**: a BitTorrent implementation, a VPN manager, a NAS
+Sprout is **not**: a BitTorrent implementation, a VPN manager, a NAS
 administrator, or a qBittorrent process manager (out of initial core scope).
 Transmission support is out of scope before 1.0.
 

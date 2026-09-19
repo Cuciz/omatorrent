@@ -7,12 +7,14 @@ current state. Keep under ~60 lines. Do not paste conversations.
 
 Phase 0.5 MERGED (PR #10 @ merge `6563bd4`, approved head `8f0b515`,
 issue #9 closed; final record docs/agent/PHASE05.md incl. merge SHA
-and the three external-review rounds). **NEXT MILESTONE (binding):
-0.5.1 — SPROUT REBRAND** (public name "Sprout", tagline "Torrent
-client for Omarchy"; visual direction and logo-family targets in
-docs/ROADMAP.md; technical identifiers NOT renamed — the 0.5.1
-planning phase audits every occurrence first). Phase 0.6 has NOT
-started; VPN/NAS/network monitoring remain out of scope.
+and the three external-review rounds). **CURRENT MILESTONE:
+0.5.1 — SPROUT REBRAND IMPLEMENTED** (branch
+`feat/phase051-sprout-rebrand`, issue #11, PR #12 OPEN — NOT merged;
+brand spec docs/BRAND.md, evidence docs/agent/PHASE051.md; technical
+identifiers NOT renamed — pre-1.0 migration list in BRAND.md). After
+merge, the next milestone is 0.6 (torrent controls; NOT started).
+Phase 0.6 has NOT started; VPN/NAS/network monitoring remain out of
+scope.
 
 ## COMPLETED
 

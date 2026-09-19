@@ -20,3 +20,4 @@
 # Editor
 *.swp
 .idea/
+__pycache__/

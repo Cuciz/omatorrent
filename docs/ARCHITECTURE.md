@@ -1,4 +1,4 @@
-# OmaTorrent — Architecture
+# Sprout — Architecture
 
 Status: DRAFT. Binding decisions live in `docs/adr/`; this file is the map.
 
@@ -51,7 +51,7 @@ mutable state.
 - Go 1.27.1 via mise (repo-scoped; `sudo pacman -S go` recommended
   permanently — docs/DEVELOPMENT.md).
 - Installed plugin naming convention observed: `author.plugin-name`
-  (e.g. `b.okomart`, `local.networks`). OmaTorrent dev ID:
+  (e.g. `b.okomart`, `local.networks`). Sprout dev ID (omatorrent retained as the technical id, docs/BRAND.md):
   `local.omatorrent` (public ID OPEN).
 
 ## Phase 0.4 as-built (2026-09-19)

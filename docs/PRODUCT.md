@@ -1,6 +1,7 @@
-# OmaTorrent — Product Definition
+# Sprout — Product Definition
 
-Status: DRAFT — the durable statement of what OmaTorrent is and is not.
+Status: DRAFT — the durable statement of what Sprout is and is not
+(product name since 0.5.1, docs/BRAND.md; formerly the OmaTorrent working name).
 Labels: [DECISION] = settled product direction; [PROPOSAL] = default
 intention, changeable without an ADR; [OPEN] = open question.
 

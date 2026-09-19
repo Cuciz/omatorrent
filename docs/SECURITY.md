@@ -1,4 +1,4 @@
-# OmaTorrent — Security Model
+# Sprout — Security Model
 
 Status: PHASE 0.5 — remote-backend security model defined BEFORE
 implementation (ADR-0008/0009); the standing rules below are enforced
@@ -7,7 +7,7 @@ are recorded in docs/agent/ per change.
 
 ## Scope [DECISION 2026-09-19]
 
-OmaTorrent is strictly torrent-focused. VPN monitoring is out of scope
+Sprout is strictly torrent-focused. VPN monitoring is out of scope
 entirely (owned by another Omarchy plugin); NAS administration and
 general network monitoring are out of scope. Nothing in this file may
 be read as permission to grow into those areas.

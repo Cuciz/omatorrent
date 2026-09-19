@@ -1,4 +1,4 @@
-# OmaTorrent — Development Environment & Commands
+# Sprout — Development Environment & Commands
 
 Status: PHASE 0 IMPLEMENTED. This file is the single source for "which
 commands to run"; update it when tooling changes.
@@ -25,6 +25,8 @@ commands to run"; update it when tooling changes.
 |---|---|---|
 | Harness validation | `python3 tools/validate_harness.py` | AVAILABLE |
 | Guard hook test | `bash tools/test_guard_hook.sh` | AVAILABLE |
+| Brand asset validation (0.5.1) | `python3 tools/validate_brand.py` | AVAILABLE |
+| Brand asset regeneration | `python3 assets/brand/generate.py` | AVAILABLE |
 | Go build | `cd omatorrent-service && go build ./...` | AVAILABLE |
 | Go vet / format | `go vet ./... && gofmt -l .` | AVAILABLE |
 | Go unit + contract tests | `go test -race ./...` | AVAILABLE |
