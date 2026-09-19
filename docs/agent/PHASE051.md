@@ -49,11 +49,11 @@ the approved brand reference.
 |---|---|---|---|
 | 1 | Bar widget (glyph + speeds) | PASS — glyph crisp, optically aligned, single render | phase051-bar.png |
 | 2 | Panel populated (local, long torrent name) | PASS — two-row header; long name elides | phase051-panel-local.png |
-| 3 | Panel empty state | PASS — glyph, green SPROUT wordmark, copy, Add magnet | phase051-panel-empty.png |
+| 3 | Panel empty state | PASS — glyph, green SPROUT wordmark ≥120 px (BRAND.md minimum; initial 21×5 px sizing bug caught by UI review, fixed + re-captured), copy, Add magnet | phase051-panel-empty.png |
 | 4 | Panel auth_required (live fixture) | PASS — truthful callout + settings link + last-known | phase051-panel-auth-required.png |
 | 5 | Panel auth_failed (live, wrong password) | PASS — sticky class | phase051-panel-auth-failed.png |
 | 6 | Panel TLS failure (live, self-signed) | PASS — tls_hostname, no-downgrade copy | phase051-panel-tls-failed.png |
-| 7 | Panel insecure HTTP (live ack flow) | PASS — "connected (insecure) · 192.168.1.141:8090" + badge | phase051-panel-remote-insecure.png |
+| 7 | Panel insecure HTTP (live ack flow) | PASS — "connected (insecure) · 192.168.1.141:8090" + badge + empty state | phase051-panel-remote-insecure.png |
 | 8 | Dashboard local | PASS — glyph + Sprout + tagline, state/version/host | phase051-dashboard-local.png |
 | 9 | Dashboard remote (insecure fixture) | PASS | phase051-dashboard-remote.png |
 | 10 | Panel light theme (Catppuccin Latte) | PASS — glyph follows theme fg; green wordmark readable; semantic warning intact | phase051-panel-light-theme.png |

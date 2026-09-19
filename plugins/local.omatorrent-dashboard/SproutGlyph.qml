@@ -13,7 +13,7 @@ Canvas {
   // for empty state / larger brand contexts, "wordmark" for the SPROUT
   // pixel wordmark (empty state title only — docs/BRAND.md §usage).
   property string variant: "compact"
-  property color glyphColor: Style.foreground
+  property color glyphColor: Color.foreground
 
   readonly property var grids: ({
     "compact": [

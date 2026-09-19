@@ -301,6 +301,11 @@ BarWidget {
         height: Math.round(button.fontSize)
         anchors.verticalCenter: parent.verticalCenter
         glyphColor: root.statusColor
+
+        Behavior on glyphColor {
+          enabled: !root.bar || root.bar.foregroundAnimationEnabled
+          ColorAnimation { duration: 160 }
+        }
       }
       Text {
         anchors.verticalCenter: parent.verticalCenter
@@ -309,6 +314,11 @@ BarWidget {
         font.family: button.fontFamily
         font.pixelSize: button.fontSize
         renderType: Text.NativeRendering
+
+        Behavior on color {
+          enabled: !root.bar || root.bar.foregroundAnimationEnabled
+          ColorAnimation { duration: 160 }
+        }
       }
     }
   }

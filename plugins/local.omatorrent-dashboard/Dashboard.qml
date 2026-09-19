@@ -425,6 +425,8 @@ Item {
                 text: root.connHostLabel
                 anchors.right: parent.right
                 anchors.top: versionTextItem.bottom
+                width: Math.min(implicitWidth, parent.width - titleRow.width - Style.space(6))
+                elide: Text.ElideRight
                 color: root.dim
                 font.pixelSize: Style.font.caption
                 font.family: Style.font.family

@@ -70,8 +70,13 @@ Authentication failure is never rendered in brand green.
 
 - Clear space: ≥ 1 glyph-height around the lockup; ≥ 0.5 glyph-height
   around the compact glyph.
-- Minimum sizes: compact glyph 16 px; wordmark/lockup 120 px wide;
-  terminal variant ≥ 80-column terminal.
+- Minimum sizes: compact glyph 16 px and wordmark/lockup 120 px wide
+  apply to **standalone logo use** (README, favicon, presentations).
+  Inline header glyphs (bar widget, panel/dashboard headers) instead
+  **track the surrounding font size** — the Omarchy-native idiom that
+  keeps the bar compact and optically aligned with Nerd Font icons;
+  the empty-state wordmark renders ≥ 120 px wide at default scale.
+  Terminal variant ≥ 80-column terminal.
 - Monochrome: the glyph and wordmark must stay recognizable in a
   single foreground color (mono variants exist for both). In the bar
   and panel headers the glyph always renders in the theme foreground

@@ -1115,14 +1115,16 @@ Panel {
 
             SproutGlyph {
               variant: "full"
-              height: Style.space(11)
+              // Full glyph above the wordmark; sizes follow BRAND.md
+              // minimums (wordmark ≥ 120 px wide at default scale).
+              height: Style.space(16)
               anchors.horizontalCenter: parent.horizontalCenter
               glyphColor: root.barForeground
               opacity: 0.75
             }
             SproutGlyph {
               variant: "wordmark"
-              height: Style.space(5)
+              height: Style.space(29)
               anchors.horizontalCenter: parent.horizontalCenter
               glyphColor: "#A1D06A"
             }
