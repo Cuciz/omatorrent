@@ -5,9 +5,14 @@ current state. Keep under ~60 lines. Do not paste conversations.
 
 ## CURRENT OBJECTIVE
 
-Phase 0.4 MERGED (PR #8 @ merge `df373af`, head `6518550`, issue #7
-closed; final record docs/agent/PHASE04.md incl. merge SHA). Next:
-Phase 0.5 planning per docs/ROADMAP.md.
+Phase 0.5 MERGED (PR #10 @ merge `6563bd4`, approved head `8f0b515`,
+issue #9 closed; final record docs/agent/PHASE05.md incl. merge SHA
+and the three external-review rounds). **NEXT MILESTONE (binding):
+0.5.1 — SPROUT REBRAND** (public name "Sprout", tagline "Torrent
+client for Omarchy"; visual direction and logo-family targets in
+docs/ROADMAP.md; technical identifiers NOT renamed — the 0.5.1
+planning phase audits every occurrence first). Phase 0.6 has NOT
+started; VPN/NAS/network monitoring remain out of scope.
 
 ## COMPLETED
 

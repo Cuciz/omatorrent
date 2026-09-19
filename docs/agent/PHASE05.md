@@ -2,6 +2,21 @@
 
 Branch `feat/phase05-remote-qbittorrent` (base `93e14c1`, issue #9).
 This file records the Phase 0.5 evidence per docs/TESTING.md rules.
+
+## FINALIZATION (2026-09-19)
+
+- External final review: **APPROVE FOR MERGE, blockers: none**.
+- **PR #10 MERGED** (normal merge commit, no squash/rebase) at
+  approved head **`8f0b515d442906999dc60d6b3c4caef7930c9800`**;
+  merge SHA **`6563bd443afd01f580584eaecdbdf7ae3265a35d`**.
+- **Issue #9 CLOSED** by the merge.
+- Phase 0.5 — remote qBittorrent + security hardening — is
+  **COMPLETE** on `main`; no remaining blockers. Feature branch
+  deleted (local + remote) after merge.
+- Next milestone (binding product decision): **0.5.1 — SPROUT
+  REBRAND** (public name "Sprout", tagline "Torrent client for
+  Omarchy"; technical identifiers unchanged; see ROADMAP and
+  docs/agent/HANDOFF.md). Phase 0.6 has NOT started.
 Review verdicts are recorded verbatim below; the omatorrent-dev-harness
 reviewer agents were not available in this session — reviews were run
 by independent read-only agents with the same charters (noted per

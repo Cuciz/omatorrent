@@ -26,20 +26,40 @@ OmaTorrent stays **strictly torrent-focused**:
 | 0.3 | Essential torrent actions (pause/resume/add/remove, explicit delete-files, staged confirmation) | 0.2 | mutation contract tests; confirmation flow for removal; degraded states truthful |
 | 0.4 | Dashboard | 0.2 | dashboard renders health/stats from real daemon data; lifecycle open/close stable |
 | 0.5 | Remote qBittorrent + security hardening | 0.3 | TLS + credential handling security-reviewed; remote backend integration test |
+| 0.5.1 | Sprout rebrand (public identity: "Sprout — Torrent client for Omarchy"; Omarchy-native pixel visual language, sprout-green accent; technical identifiers unchanged — separate audit classifies RENAME NOW / KEEP INTERNAL / MIGRATE BEFORE 1.0 / ALIAS / UNCERTAIN) | 0.5 | public brand surfaces rebranded; no filesystem/service/IPC renames without the audit |
 | 0.6 | Advanced torrent controls (speed limits, force start, recheck, queue priority, categories/tags, possibly reannounce; other torrent-specific controls after research) | 0.5 | controls verified against live backend; ADR-0006 mutation safety extended without regression |
 | 0.7 | Torrent files / content management (file tree, per-file progress, file priorities, content selection, folder/file display, torrent-content storage information) | 0.6 | file-tree truthfulness + per-file priority changes verified; destructive-path protections tested |
 | 0.8 | Metrics/history/diagnostics | 0.4 | SQLite schema + migrations tested; data derived from real sources |
 | 0.9 | CI, update/rollback, hardening | all | CI green on tagged runs; upgrade + rollback tested; release gates pass |
 | 1.0 | Release | 0.9 | full release gate run (omatorrent-release skill) READY verdict |
 
-## Phase 0.5 — Remote qBittorrent + security hardening (IN PROGRESS, issue #9)
+## Phase 0.5 — Remote qBittorrent + security hardening (MERGED 2026-09-19 via PR #10 @ 6563bd4)
 
-Connect securely to a qBittorrent WebUI endpoint that is not necessarily
-localhost (LAN server, NAS/container, HTTPS reverse proxy, remote host
-over an existing secure path). Strictly torrent-focused: no VPN client,
-no proxy/SSH-tunnel/Tailscale manager, no NAS admin, no network monitor,
-no multi-instance management, no Transmission. Local experience
-unchanged (localhost bypass keeps working without credentials).
+Remote qBittorrent backends (LAN/NAS/HTTPS reverse proxy/secure path),
+strict URL policy incl. factual insecure reporting, Secret Service
+credential storage (ADR-0009), fail-closed TLS with TOFU pinning,
+backend epochs with drain-serialized configure transactions, IPC v1.4
+(ADR-0008), panel-inline connection settings. Approved head
+8f0b515; three external review rounds closed (final: APPROVE FOR
+MERGE, no blockers). Evidence: docs/agent/PHASE05.md.
+
+## Phase 0.5.1 — Sprout rebrand (NEXT, binding product decision)
+
+Public product identity becomes **Sprout** ("Torrent client for
+Omarchy"), replacing the user-facing OmaTorrent brand BEFORE advanced
+torrent controls. Visual direction: Omarchy-native first, pixel/bitmap
+construction, sharp grid alignment; no vector-tech, no neon, no
+glassmorphism, no gradients, no hacker noise; young sprout-green /
+acid-lime primary accent, warm orange secondary, Omarchy background —
+~95% Omarchy, 5% Sprout identity. Deliverables: compact pixel glyph
+(sprout/germination, legible 16–24 px, monochrome-capable), main logo
+(glyph + pixel wordmark), terminal/block-character variant, empty
+state with glyph. Standard torrent terminology unchanged (no
+gardening-metaphor renaming). TECHNICAL IDENTIFIERS (repo name, Go
+module, omatorrent-service, socket/config paths, IPC service ids,
+packages, ADR filenames) are NOT renamed in 0.5.1 — the dedicated
+planning phase audits every occurrence first. VPN/NAS/network
+monitoring remain completely out of scope.
 
 ## Phase 0.4 — Dashboard (MERGED 2026-09-19 via PR #8 @ df373af)
 
