@@ -1,8 +1,23 @@
 # Phase 0.3 — Essential torrent actions (record)
 
 Tracking: GitHub issue #5; branch `feat/phase03-essential-actions`.
-Status: IMPLEMENTED, PR open for external review (NOT merged). Date: 2026-09-19.
+Status: MERGED. Date: 2026-09-19.
 Base: main @ 7b2a914 (Phase 0.2 merged at 3e090d5).
+
+## Final merge record (2026-09-19)
+
+- PR #6 **MERGED** into `main` via merge commit
+  `fc8615f0996dd41b4df6192db7a098655338e6a3`
+  (normal merge method, matching the PR #2/#4 convention; no
+  squash/rebase/force-push).
+- Final accepted head: `0061926588a304fccb947f74e214906608cb1e68`
+  (pre-merge verification: OPEN, base `main` @ `7b2a914`, MERGEABLE/CLEAN,
+  8 commits, 0 review threads, no new commits, no failing checks,
+  head SHA identical to the externally approved head).
+- External review verdict on head `0061926`: APPROVE FOR MERGE.
+- Issue #5 CLOSED (COMPLETED) by the merge.
+- Local `main` fast-forwarded to `fc8615f`, tree clean; merged local
+  branch deleted.
 
 ## Delivered
 
