@@ -35,9 +35,12 @@ that owns state normalization — and makes the dashboard a pure renderer
 of one bounded frame. The existing v1.0 `system.status` already
 establishes the pattern (cache-served poll frames, never contacting the
 backend); v1.3 extends it with the aggregate payload the dashboard
-needs. Aggregation cost is one O(N) pass per request over committed
-state (µs at N=1 000, measured in benchmarks); no cache or
-invalidation machinery is warranted.
+needs. Aggregation complexity is O(N + A log A) — one pass over all N
+torrents plus a sort of the A active candidates (worst case A = N ⇒
+O(N log N)); the measured full-response cost at N=1 000 is a few
+milliseconds per poll (layered benchmarks in the repo), acceptable at
+the ≤ 1 Hz client cadence, so no cache or invalidation machinery is
+warranted.
 
 ## DECISION
 

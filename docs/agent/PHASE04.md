@@ -13,7 +13,9 @@ Dashboard overlay plugin (local.omatorrent-dashboard, overlay kind,
   not keepLoaded → destroyed on close; emojis/clipboard skeleton)
     ↓ IPC v1.3 (ADR-0007: dashboard.status poll, one in flight, id-matched)
 daemonHandler.Dashboard() → state.Aggregate(committed State)
-  (O(N) pure aggregation: counts, saturating byte sums, top-5 active)
+  (O(N + A log A): counts, saturating byte sums, top-5 active —
+  one pass over N torrents plus a sort of the A active candidates,
+  worst case O(N log N))
 syncer commits free_space_on_disk (last-known-good, dropped degraded)
 ```
 
@@ -86,8 +88,10 @@ deployed via user systemd unit; plugin deployed to
 | Guard hook | PASS | 39/39 |
 | omarchy plugin validate (both plugins) | PASS | exit 0 |
 | Quickshell smoke (incl. v1.3 + v1.2 regression) | PASS | dashboard=1 dash-model=1 subscribed=1 mutation-stages=10/10 failures=0 (final run; schema exact-key check, aggregate invariants, counts.total == v1.1 snapshot items cross-check) |
-| Benchmark: state.Aggregate | MEASURED | 10 → 6.9 µs · 100 → 103 µs · 1000 (all-active worst case) → 1.59 ms/op, 181 KB/op, 25 allocs |
-| IPC payload vs population | MEASURED | ok-frame 830/838/846 B at 10/100/1000 torrents (digit-width deltas only; O(1) by design); worst-case pathological-name frame 1781 B < 4096 budget |
+| Benchmark L1: state.Aggregate only | MEASURED | 10 → ~7.1 µs · 100 → ~94 µs · 1000 (all-active worst case) → ~1.33 ms/op, 181 KB/op, 22 allocs (median of 3, no -race) |
+| Benchmark L2: syncer.State() + Aggregate | MEASURED | 10 → ~10.3 µs · 100 → ~146 µs · 1000 → ~2.47 ms/op, 476 KB/op, 24 allocs (adds the RLock + torrent-map clone) |
+| Benchmark L3: full dashboard.status response (State + Aggregate + adaptation + EncodeDashboardStatus) | MEASURED | 10 → ~24 µs · 100 → ~151 µs · 1000 → ~2.53 ms/op, 480 KB/op, 37 allocs (cmd-level benchmark; excludes socket I/O) |
+| IPC payload vs population | MEASURED | ok-frame 830/838/846 B at 10/100/1000 torrents (digit-width deltas only; O(1) by design); worst-case pathological frame 2486 B < 4096 budget (TestDashboardStatusFrameBudget at the final reviewed encoder; supersedes the earlier CJK-premise 1781 B and the external-review replica 3319 B figures) |
 | QML dashboard open/close/render | PASS | live screenshot (docs/screenshots/phase04-dashboard-live.png) — header/transfer/counts/data/free-space/footer all rendering real values |
 | Escape close / click-outside code path | PASS | 2× open→Escape cycles after fix, zero journal warnings |
 | Degraded: daemon unavailable (A) | PASS | screenshot phase04-dashboard-daemon-degraded.png — urgent callout, sections hidden, bar qBT OFFLINE |
@@ -123,16 +127,36 @@ deployed via user systemd unit; plugin deployed to
 
 ## Performance statement
 
-- MEASURED: Go aggregate benchmark (above); IPC frame sizes (above);
-  daemon fd/socket counts flat across 50 open/close cycles.
-- ANALYZED (not measured): QML cost is O(1) in torrent count — the
+Categories kept strictly separate:
+
+- MEASURED (exact benchmark targets; fixtures all-active — A = N, the
+  sort's worst case; medians of 3 runs, race detector OFF, i5-1334U
+  under a live desktop, load average ~1.3):
+  - L1 `BenchmarkDashboardAggregate` — state.Aggregate ONLY (excludes
+    the State() clone and IPC encoding): 10 → ~7.1 µs · 100 → ~94 µs ·
+    1000 → ~1.33 ms/op.
+  - L2 `BenchmarkDashboardStateAndAggregate` — syncer.State() (RLock +
+    torrent-map clone) + Aggregate: 10 → ~10.3 µs · 100 → ~146 µs ·
+    1000 → ~2.47 ms/op.
+  - L3 `BenchmarkDashboardStatusResponse` (cmd) — the full per-request
+    path minus socket I/O: State() + Aggregate + daemonHandler
+    adaptation + EncodeDashboardStatus: 10 → ~24 µs · 100 → ~151 µs ·
+    1000 → ~2.53 ms/op, 480 KB, 37 allocs.
+  - IPC ok-frame 830/838/846 B at 10/100/1000 torrents (O(1) in
+    population); worst-case pathological frame 2486 B < 4096 budget
+    (TestDashboardStatusFrameBudget, final encoder).
+  - Daemon fd/socket counts flat across 50 open/close cycles.
+- ANALYZED (not measured): aggregate complexity is O(N + A log A)
+  (worst case O(N log N)); QML cost is O(1) in torrent count — the
   dashboard renders ≤5 active rows from one ~840 B frame, holds no
-  per-torrent model, and no QML timings were taken; timer cadence is
-  2 s poll while open, zero while closed (component destroyed).
-- Daemon CPU at 1000 torrents worst case: 1.59 ms per poll ⇒ ~0.08%
-  of one core at the documented ≤1 Hz client cadence. dashboard.status
-  answering performs no qBittorrent I/O (cache-served, same rule as
-  system.status).
+  per-torrent model; timer cadence is 2 s poll while open, zero while
+  closed (component destroyed); no QML timings were taken.
+- ESTIMATED (arithmetic from the L3 measurement, not separately
+  measured): one open dashboard polling at the documented ≤1 Hz costs
+  at most ~2.5 ms per second of one core (~0.25%) at 1000 all-active
+  torrents — worst case; typical states (few active) sit near the L1
+  floor. dashboard.status answering performs no qBittorrent I/O
+  (cache-served, same rule as system.status).
 
 ## Known limitations
 

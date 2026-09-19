@@ -299,8 +299,10 @@ carrying the replaying request's `id` plus the recorded terminal status
 
 Read-only, current state only (no history — that is Phase 0.8). One
 request type, served exclusively from the daemon's committed state
-(answering never contacts qBittorrent; O(N) aggregation over the
-committed torrent map, N ≤ thousands).
+(answering never contacts qBittorrent; aggregation over the committed
+torrent map is O(N + A log A) — N torrents plus a sort of the A active
+candidates — with a measured full-response cost of a few milliseconds
+at N = 1 000).
 
 ### Request (after hello; exact two keys, like health)
 

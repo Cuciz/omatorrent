@@ -60,7 +60,9 @@ mutable state.
 
 - IPC v1.3 (ADR-0007): `dashboard.status` request/response (live +
   degraded shapes). Every dashboard number is computed daemon-side by
-  `state.Aggregate` over the committed state (O(N), saturating sums,
+  `state.Aggregate` over the committed state (O(N + A log A) — one pass
+  over N torrents plus a sort of the A active candidates, worst case
+  O(N log N); saturating sums,
   classification semantics identical to the panel filters) and served
   from cache — answering never contacts qBittorrent. `free_space_on_disk`
   is now committed into normalized state (last-known-good, dropped on

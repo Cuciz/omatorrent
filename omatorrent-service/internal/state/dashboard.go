@@ -60,8 +60,11 @@ func satAdd(a, b int64) int64 {
 }
 
 // Aggregate computes the dashboard payload from one committed state.
-// O(N) over torrents with a bounded sort of the active candidates;
+// Complexity O(N + A log A): one pass over all N torrents plus a sort
+// of the A active candidates (worst case A = N ⇒ O(N log N));
 // deterministic ordering (speed desc, then name asc, then hash asc).
+// The measured cost at the ≤1 Hz client cadence is acceptable, so the
+// sort is deliberately not replaced by a bounded top-5 selection.
 func Aggregate(st State) Dashboard {
 	d := Dashboard{FreeSpace: st.FreeSpace}
 	type cand struct {

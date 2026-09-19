@@ -113,7 +113,12 @@ func benchmarkState(n int) State {
 }
 
 // BenchmarkDashboardAggregate measures the v1.3 aggregate computation
-// (per dashboard.status poll; worst case: every torrent transferring).
+// ONLY — the pure state.Aggregate function over a prebuilt state. It
+// EXCLUDES the syncer.State() snapshot read/clone and the IPC response
+// construction; those layers have their own benchmarks (see
+// BenchmarkDashboardStateAndAggregate and the cmd-level response
+// benchmark). Fixture: every torrent transferring (A = N, the sort's
+// worst case).
 func BenchmarkDashboardAggregate(b *testing.B) {
 	for _, n := range benchSizes() {
 		b.Run(fmt.Sprintf("torrents=%d", n), func(b *testing.B) {
@@ -121,6 +126,27 @@ func BenchmarkDashboardAggregate(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				Aggregate(st)
+			}
+		})
+	}
+}
+
+// BenchmarkDashboardStateAndAggregate measures the state-layer cost of
+// one dashboard.status data fetch: syncer.State() (RLock + torrent-map
+// clone) followed by Aggregate. Still excludes the cmd-level field
+// adaptation and IPC encoding.
+func BenchmarkDashboardStateAndAggregate(b *testing.B) {
+	for _, n := range benchSizes() {
+		b.Run(fmt.Sprintf("torrents=%d", n), func(b *testing.B) {
+			fb := &fakeBackend{resps: []qbittorrent.Maindata{benchFull(n, "downloading")}}
+			s := New(fb, Options{}, quietLogger())
+			if !s.cycle(context.Background(), time.Second) {
+				b.Fatal("setup cycle failed")
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				Aggregate(s.State())
 			}
 		})
 	}
