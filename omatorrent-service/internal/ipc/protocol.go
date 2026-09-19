@@ -170,17 +170,19 @@ func EncodeSnapshotEnd(id int64) []byte {
 
 // EncodeDeltas splits one change event into as many delta frames as the
 // byte budget requires (all sharing seq; bounded per frame). Lists are
-// always JSON arrays, never null.
-func EncodeDeltas(ev DeltaEvent) [][]byte {
+// always JSON arrays, never null. ok is false when a committed item
+// cannot be framed within the budget — a committed update must never
+// silently disappear, so the caller terminates the subscriber (which
+// reconnects and rebuilds from a fresh snapshot) instead of dropping it.
+func EncodeDeltas(ev DeltaEvent) (frames [][]byte, ok bool) {
 	const budget = 3800 // headroom under MaxFrame for JSON overhead
-	var out [][]byte
 	changed := make([]TorrentItem, 0, len(ev.Changed))
 	removed := make([]string, 0, len(ev.Removed))
 	flush := func() {
 		if len(changed) == 0 && len(removed) == 0 {
 			return
 		}
-		out = append(out, mustMarshal(deltaResponse{"torrent.delta", ProtocolVersion, ev.Seq, changed, removed}))
+		frames = append(frames, mustMarshal(deltaResponse{"torrent.delta", ProtocolVersion, ev.Seq, changed, removed}))
 		changed = make([]TorrentItem, 0, cap(changed))
 		removed = make([]string, 0, cap(removed))
 	}
@@ -189,10 +191,10 @@ func EncodeDeltas(ev DeltaEvent) [][]byte {
 		t.Name = CapName(t.Name)
 		b, err := json.Marshal(t)
 		if err != nil {
-			continue // unreachable for current field types; never panic
+			return nil, false // unreachable for current field types
 		}
 		if len(b) > budget {
-			continue // a single pathological item is dropped, not framed
+			return nil, false // never silently drop a committed update
 		}
 		if size+len(b) > budget && (len(changed) > 0 || len(removed) > 0) {
 			flush()
@@ -210,13 +212,15 @@ func EncodeDeltas(ev DeltaEvent) [][]byte {
 		size += len(h) + 16
 	}
 	flush()
-	return out
+	return frames, true
 }
 
 // EncodeSnapshotItem caps name and category and never emits a frame
 // above MaxFrame: with syncer-validated hashes (40/64 hex) the worst
 // case fits the budget, and the halving guard below is pure defense
-// against pathological escape amplification.
+// against pathological escape amplification. A nil return means the
+// item cannot be framed at all — the caller aborts the subscription
+// (no silent loss).
 func EncodeSnapshotItem(id int64, index int, t TorrentItem) []byte {
 	t.Name = CapName(t.Name)
 	t.Category = capString(t.Category, 128)
@@ -224,6 +228,9 @@ func EncodeSnapshotItem(id int64, index int, t TorrentItem) []byte {
 	for len(b)+1 > MaxFrame && len([]rune(t.Name)) > 32 {
 		t.Name = capString(t.Name, len([]rune(t.Name))/2)
 		b = mustMarshal(snapshotItemResponse{"torrent.snapshot.item", ProtocolVersion, id, index, t})
+	}
+	if len(b)+1 > MaxFrame {
+		return nil
 	}
 	return b
 }

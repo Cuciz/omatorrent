@@ -63,14 +63,20 @@ changes; v1 clients that never send the new request see no difference
   frame budget); `hash` is 40 hex chars.
 - No qBittorrent-version, path, tracker, or secret data crosses the IPC.
 
-### Delivery and flow control
+### Delivery and flow control (amended from review)
 
 - One subscription per connection; at most 16 connections total
   (unchanged).
-- Per-subscriber bounded queue (256 frames). Overflow or a blocked
-  writer (5 s write deadline exceeded) closes the connection — the
-  client re-handshakes, re-subscribes and rebuilds from the fresh full
-  snapshot. Slow consumers cannot grow daemon memory.
+- The initial snapshot is delivered serially WITH BACKPRESSURE (the
+  server waits for queue space, bounded by a 30 s delivery window) so a
+  1 000+ torrent snapshot cannot disconnect a healthy subscriber merely
+  for exceeding the live queue size. Only post-snapshot deltas use the
+  bounded 256-frame queue; overflow or a blocked writer (5 s write
+  deadline exceeded) closes the connection — the client re-handshakes,
+  re-subscribes and rebuilds. Slow consumers cannot grow daemon memory.
+- Unframmable committed items (impossible under the normalization caps,
+  but guarded) terminate the subscriber instead of being dropped — no
+  silent loss; recovery is reconnect + fresh snapshot.
 - Reconnect semantics: every new subscription starts with a full
   snapshot under a fresh id; `seq` restarts per subscription and is
   strictly increasing within one. Stale frames cannot survive a

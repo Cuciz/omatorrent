@@ -142,7 +142,7 @@ contain gaps; it identifies ordering, not per-subscription counting.
 | category | string | may be empty |
 | size / completed | integer | bytes |
 
-### Lifecycle
+### Lifecycle and flow control
 
 - One subscription per connection; a second `torrent.subscribe` gets an
   `unsupported_message` error frame but does NOT close the connection
@@ -150,9 +150,24 @@ contain gaps; it identifies ordering, not per-subscription counting.
   the connection closes.
 - Every (re)subscription starts with a fresh full snapshot under its own
   id; stale frames cannot survive a reconnect.
-- Per-subscriber server-side queue is bounded (256 frames); overflow or
-  an unwritable subscriber (5 s write deadline exceeded) closes the
-  connection — the client re-handshakes, re-subscribes, rebuilds.
+- Snapshot delivery is serialized with BACKPRESSURE: the server writes
+  snapshot frames one by one, waiting for queue space, bounded by a
+  total delivery window (30 s). A snapshot larger than the live queue
+  (e.g. 1 000 torrents ≈ 1 003 frames) never disconnects a healthy
+  subscriber; a subscriber that cannot drain the snapshot within the
+  window is disconnected.
+- Live deltas after the snapshot use a bounded per-connection queue
+  (256 frames); queue overflow or an unwritable subscriber (5 s write
+  deadline exceeded) closes the connection — the client re-handshakes,
+  re-subscribes, rebuilds. A change committed during snapshot delivery
+  is delivered strictly after `snapshot.end`.
+- Failure behavior for pathological data: normalized items always fit
+  the frame budget (hashes validated 40/64 hex, names ≤512 runes,
+  categories ≤128 runes at daemon normalization). If a committed item
+  nevertheless cannot be encoded within the budget, the daemon
+  TERMINATES the subscriber connection — the client reconnects and
+  rebuilds from a fresh snapshot. A committed update is never silently
+  dropped or partially hidden.
 - While subscribed, the v1.0 requests (health/system.status) remain
   available on the same connection.
 - The daemon pushes only committed state: a snapshot or delta is never

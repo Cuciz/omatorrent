@@ -33,13 +33,16 @@ var (
 )
 
 // ServerState is the subset of sync/maindata server_state OmaTorrent
-// uses. It is optional on delta responses (absent when unchanged); the
-// caller merges present fields into last-known-good state.
+// uses. The whole object is optional on delta responses (absent when
+// unchanged), and individual fields may be partial: pointer fields
+// distinguish "absent" from "present zero value". This representation
+// lives ONLY at the adapter boundary — the state layer merges present
+// fields into plain scalars.
 type ServerState struct {
-	DlInfoSpeed      int64  `json:"dl_info_speed"`
-	UpInfoSpeed      int64  `json:"up_info_speed"`
-	ConnectionStatus string `json:"connection_status"`
-	FreeSpaceOnDisk  int64  `json:"free_space_on_disk"`
+	DlInfoSpeed      *int64  `json:"dl_info_speed"`
+	UpInfoSpeed      *int64  `json:"up_info_speed"`
+	ConnectionStatus *string `json:"connection_status"`
+	FreeSpaceOnDisk  *int64  `json:"free_space_on_disk"`
 }
 
 // Maindata is one sync/maindata response. Torrents values are raw JSON:

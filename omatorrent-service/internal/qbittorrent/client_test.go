@@ -119,7 +119,7 @@ func TestSyncMaindataBypassSessionAndDeltas(t *testing.T) {
 	if err != nil || !md.FullUpdate || md.RID != 1 || len(md.Torrents) != 1 {
 		t.Fatalf("first sync = %+v err=%v", md, err)
 	}
-	if md.ServerState == nil || md.ServerState.DlInfoSpeed != 10 {
+	if md.ServerState == nil || md.ServerState.DlInfoSpeed == nil || *md.ServerState.DlInfoSpeed != 10 {
 		t.Fatalf("server_state = %+v", md.ServerState)
 	}
 	// Second call with the session cookie must be a delta with a new rid.

@@ -18,7 +18,7 @@ func benchFull(n int, state string) qbittorrent.Maindata {
 		torrents[mkHash(i)] = json.RawMessage(`{"name":"` + name + `","state":"` + state + `","progress":0.42,"dlspeed":123456,"upspeed":65432,"eta":3600,"ratio":1.37,"category":"cat","size":1073741824,"completed":450971566}`)
 	}
 	return qbittorrent.Maindata{RID: 1, FullUpdate: true, Torrents: torrents,
-		ServerState: &qbittorrent.ServerState{DlInfoSpeed: 1, UpInfoSpeed: 2, ConnectionStatus: "connected"}}
+		ServerState: &qbittorrent.ServerState{DlInfoSpeed: ptrInt64(1), UpInfoSpeed: ptrInt64(2), ConnectionStatus: ptrString("connected")}}
 }
 
 // benchDelta builds a delta touching k of n existing torrents.
@@ -28,7 +28,7 @@ func benchDelta(rid int64, n, k int) qbittorrent.Maindata {
 		torrents[mkHash((i*97)%n)] = json.RawMessage(`{"dlspeed":999999,"upspeed":1,"progress":0.5}`)
 	}
 	return qbittorrent.Maindata{RID: rid, Torrents: torrents,
-		ServerState: &qbittorrent.ServerState{DlInfoSpeed: 9, UpInfoSpeed: 9, ConnectionStatus: "connected"}}
+		ServerState: &qbittorrent.ServerState{DlInfoSpeed: ptrInt64(9), UpInfoSpeed: ptrInt64(9), ConnectionStatus: ptrString("connected")}}
 }
 
 func benchSizes() []int { return []int{10, 100, 1000} }

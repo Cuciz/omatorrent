@@ -26,7 +26,11 @@ Panel {
   property real dlSpeed: 0
   property real upSpeed: 0
   property int nextId: 1
+  // One request in flight at any time, across ALL request types
+  // (docs/IPC.md client rules): pendingKind is "" | "status" |
+  // "subscribe" and clears only on the matching id-verified response.
   property int pendingId: -1
+  property string pendingKind: ""
   property real pendingSince: 0
   property int backoffMs: 1000
   property bool helloSent: false
@@ -59,17 +63,26 @@ Panel {
   }
 
   function requestStatus() {
-    if (pendingId !== -1) return
+    if (pendingKind !== "") return
+    pendingKind = "status"
     pendingId = nextId++
     pendingSince = Date.now()
     send({ type: "system.status", id: pendingId })
   }
 
+  function requestSubscribe() {
+    if (pendingKind !== "" || subscribed) return
+    pendingKind = "subscribe"
+    pendingId = nextId++
+    pendingSince = Date.now()
+    send({ type: "torrent.subscribe", id: pendingId })
+  }
+
   function resetSession() {
     helloSent = false
     subscribed = false
-    subId = null
     pendingId = -1
+    pendingKind = ""
     daemonUp = false
     backendOk = false
     dlSpeed = 0
@@ -113,11 +126,30 @@ Panel {
 
   function applyItem(item) {
     if (!validItem(item)) return // malformed daemon data never reaches the model
-    const isNew = torrents[item.hash] === undefined
+    if (applyingSnapshot) {
+      // Snapshot items only populate the map: ordering and view are
+      // built once at snapshot.end (O(N log N), not per-item splice).
+      torrents[item.hash] = item
+      return
+    }
+    const prev = torrents[item.hash]
+    const isNew = prev === undefined
+    const renamed = !isNew && prev.name !== item.name
     torrents[item.hash] = item
-    if (isNew) insertSorted(item.hash, item)
-    if (applyingSnapshot) return // batched: one rebuild at snapshot end
-    syncRow(item.hash, item, isNew)
+    if (isNew) {
+      insertSorted(item.hash, item)
+    } else if (renamed) {
+      // Keep the sorted order truthful across renames: reposition the
+      // hash, then rebuild the view once (order changed).
+      const i = order.indexOf(item.hash)
+      if (i >= 0) order.splice(i, 1)
+      insertSorted(item.hash, item)
+    }
+    if (isNew || renamed) {
+      rebuildView()
+      return
+    }
+    syncRow(item.hash, item)
   }
 
   function applyRemoved(hash) {
@@ -173,15 +205,15 @@ Panel {
     }
   }
 
-  function syncRow(hash, item, isNew) {
-    if (!isNew && matchesFilter(item)) {
+  function syncRow(hash, item) {
+    if (matchesFilter(item)) {
       const i = viewIndex(hash)
       if (i >= 0) {
         view.set(i, row(item))
         return
       }
     }
-    rebuildView() // membership or order changed
+    rebuildView() // filter membership changed
   }
 
   function handleLine(line) {
@@ -198,18 +230,22 @@ Panel {
         requestStatus()
         break
       case "system.status":
-        if (typeof msg.id !== "number" || msg.id !== pendingId) return
+        if (pendingKind !== "status" || typeof msg.id !== "number" || msg.id !== pendingId) return
         pendingId = -1
+        pendingKind = ""
         daemonUp = true
         backendOk = msg.qbittorrent === "ok"
         dlSpeed = msg.dl_speed || 0
         upSpeed = msg.up_speed || 0
-        // Subscribe only after the first status completed: exactly one
-        // request in flight at any time (docs/IPC.md client rules).
-        if (!subscribed) {
-          subscribed = true
-          send({ type: "torrent.subscribe", id: nextId++ })
-        }
+        // Exactly one request in flight: subscribe only after the status
+        // response, and only once per session.
+        if (!subscribed) requestSubscribe()
+        break
+      case "torrent.subscribed":
+        if (pendingKind !== "subscribe" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        subscribed = true
         break
       case "torrent.snapshot.begin":
         applyingSnapshot = true
@@ -232,8 +268,15 @@ Panel {
       case "error":
         break
       case "torrent.snapshot.end":
+        // Build the ordering once from the collected map and sort it:
+        // O(N log N) snapshot construction, one view rebuild.
+        order = Object.keys(torrents)
+        order.sort(function (a, b) {
+          if (torrents[a].name !== torrents[b].name) return torrents[a].name < torrents[b].name ? -1 : 1
+          return a < b ? -1 : (a > b ? 1 : 0)
+        })
         applyingSnapshot = false
-        rebuildView() // single O(N) pass for the whole snapshot
+        rebuildView()
         break
     }
   }
@@ -460,7 +503,7 @@ Panel {
     onTriggered: {
       root.ensureSession()
       if (!root.helloSent) return
-      if (root.pendingId !== -1) {
+      if (root.pendingKind !== "") {
         if (Date.now() - root.pendingSince > 6000) {
           root.resetSession()
           sock.connected = false

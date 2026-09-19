@@ -34,20 +34,30 @@ Quickshell panel (read-only) + bar widget (unchanged role, click opens panel)
 - Any rid mismatch/backend restart → full_update=true → daemon rebuilds
   and diffs against previous committed state (no ghost entries).
 
-## Performance baseline (synthetic fixtures; i5-1334U)
+## Performance baseline (CORRECTED in review round 2; synthetic fixtures
+with verified-unique hashes, i5-1334U; measured with -benchmem)
 
-| Benchmark | 10 | 100 | 1,000 |
+The first round's 1,000-torrent numbers were invalid (the fixture
+generator produced only 256 distinct hashes — review finding 8). Real
+measurements:
+
+| Benchmark (measured) | 10 | 100 | 1,000 |
 |---|---|---|---|
-| Full rebuild cycle | 71 µs | 736 µs | **2.02 ms** |
-| Delta cycle (10 changed) | 40 µs | 65 µs | **117 µs** |
-| State read (snapshot clone) | 2.8 µs | 21 µs | **75 µs** |
+| Daemon full rebuild cycle | 77 µs | 767 µs | **8.09 ms** (858 KB, 12k allocs) |
+| Daemon delta cycle (10 changed) | 54 µs | 72 µs | **375 µs** (91 allocs — O(delta), constant in N) |
+| Daemon state read (map clone) | 2.7 µs | 17 µs | **347 µs** (O(N) clone per read) |
 
-IPC payload: snapshot item ≈ 200–260 B (bounded frames); a 1,000-item
-snapshot = ~1,003 bounded frames once per subscription, then deltas of
-only changed items. No O(N) transfer per poll cycle; the panel applies
-deltas with in-place row updates (view rebuild only on membership/order
-change). Panel responsiveness observed live (smooth scroll, instant
-filter switch).
+IPC (measured, TestIPCMetrics): snapshot frames = N+3 (subscribed +
+begin + N items + end); largest encoded item frame 283–290 B; a
+10-item delta = 1 frame; a 50-item delta + 2 removals = 3 frames. All
+frames ≤ 4096 B by construction (verified in tests).
+
+Panel (complexity analysis, not timed): snapshot application is
+O(N log N) (map fill + one sort + one view build at snapshot.end);
+delta data updates are O(log N) search + O(1) row set; deltas that
+change filter membership or rename reposition and rebuild the view
+O(N). Panel responsiveness observed live (smooth scroll, instant
+filter switch) — no timing measurements taken.
 
 ## Evidence matrix (executed 2026-09-18)
 
@@ -101,6 +111,47 @@ filter switch).
   reproduced PASS (including race suite, benchmarks matching within
   noise, live smoke, daemon lifecycle, secret scan, ghost-prevention
   test). Flag acted on: screenshots re-captured fully framed.
+
+## PR review round 2 (2026-09-19, on PR #4 before merge)
+
+Eight findings addressed (head 0da831f → fixed):
+
+1. **BLOCKER — stale `subId`**: resetSession() assigned a removed
+   property (QML runtime error on every disconnect). Removed; component
+   audited (zero references). Live proof: shell restart → panel open →
+   daemon stop → daemon start → reconnect + resubscribe + recovery with
+   ZERO QML errors in the shell journal across the whole cycle.
+2. **Snapshot O(N²)**: snapshot items now populate the map only; order
+   is built and sorted once at snapshot.end (O(N log N)); single view
+   rebuild.
+3. **One request in flight across ALL types**: pendingKind state machine
+   ("" | status | subscribe); subscribe clears only on the id-verified
+   torrent.subscribed response; `subscribed` set on response, not on
+   send; timeout guard covers both kinds; reset clears both. Smoke test
+   mirrors the same discipline (no concurrent status+subscribe; the old
+   intentional violation probe removed).
+4. **Rename ordering**: delta renames reposition the hash in the sorted
+   order and rebuild the view once. Deterministic model test (A/B
+   rename reordering) runs inside the smoke test.
+5. **No silent delta drops**: EncodeDeltas returns ok=false when a
+   committed item cannot be framed; the server then terminates the
+   subscriber (reconnect + fresh snapshot). Snapshot items that cannot
+   be framed abort the subscription. Explicit test with a pathological
+   control-char item asserts refusal + disconnect.
+6. **Snapshot flow control**: the initial snapshot is delivered serially
+   with backpressure (bounded 30 s window) — a 1,000-torrent snapshot
+   (~1,003 frames) can no longer overflow the 256-frame live queue;
+   only post-snapshot deltas use the bounded drop-close queue. Tests:
+   n=1/256/1000 complete delivery, slow-snapshot disconnect,
+   delta-committed-during-snapshot ordering (strictly after snapshot.end).
+7. **Partial server_state merge**: adapter decodes server_state with
+   pointer fields (presence-aware at the boundary only); the syncer
+   merges only present fields. Tests: full, dl-only, up-only, explicit
+   zero, absent, nil — absent preserves last-known.
+8. **Invalid 1,000-torrent fixture**: mkHash now generates verified
+   unique 40-hex hashes (test checks uniqueness at 10/100/1000/10000);
+   ALL benchmarks re-run with real numbers (see the corrected table
+   above — materially higher at 1,000; claims updated everywhere).
 
 ## Known limitations
 

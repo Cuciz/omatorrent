@@ -484,8 +484,7 @@ func (s *Server) handle(conn net.Conn) {
 				return
 			}
 			if c.markSubscribed() {
-				c.send(EncodeSubscribed(req.ID))
-				s.startSubscription(c, req.ID)
+				s.startSubscription(c, req.ID) // delivers subscribed + snapshot with backpressure
 			} else {
 				// One subscription per connection; the existing one keeps
 				// working and the connection stays open (documented in
@@ -502,34 +501,63 @@ func (s *Server) handle(conn net.Conn) {
 	}
 }
 
-// startSubscription pumps one connection's torrent subscription: the
-// full snapshot first, then delta frames as the state changes.
+// startSubscription delivers the full snapshot with BACKPRESSURE and
+// then hands the connection to the delta pump (ADR-0005 flow control,
+// review finding 6): snapshot frames wait for queue space (bounded
+// memory, single writer, no healthy-subscriber disconnect merely
+// because the snapshot is larger than the delta queue), while live
+// deltas use the bounded non-blocking queue with disconnect-on-overflow.
+// A change committed during snapshot delivery waits in the events
+// channel and is delivered strictly after snapshot.end (subscription
+// registration is atomic with the snapshot's committed generation).
 func (s *Server) startSubscription(c *connIO, id int64) {
-	// Backend reachability reaches clients via system.status; the
-	// subscription carries torrent state only (ADR-0005).
 	items, events, cancel := s.subs.Subscribe()
 	c.setSubCancel(cancel)
 
 	sortItems(items)
 
-	go func() {
-		defer c.teardownIfSubscribed() // ensure cleanup on any exit path
-		if !c.send(EncodeSnapshotBegin(id, len(items))) {
-			cancel()
+	deadline := time.Now().Add(snapshotDeliveryTimeout)
+	abort := func() {
+		cancel()
+		c.teardown()
+	}
+	if !c.sendBlocking(EncodeSubscribed(id), deadline) {
+		abort()
+		return
+	}
+	if !c.sendBlocking(EncodeSnapshotBegin(id, len(items)), deadline) {
+		abort()
+		return
+	}
+	for i := range items {
+		frame := EncodeSnapshotItem(id, i, items[i])
+		if frame == nil {
+			// Cannot be framed: abort rather than silently omit.
+			abort()
 			return
 		}
-		for i := range items {
-			if !c.send(EncodeSnapshotItem(id, i, items[i])) {
+		if !c.sendBlocking(frame, deadline) {
+			abort()
+			return
+		}
+	}
+	if !c.sendBlocking(EncodeSnapshotEnd(id), deadline) {
+		abort()
+		return
+	}
+
+	go func() {
+		for ev := range events {
+			frames, ok := EncodeDeltas(ev)
+			if !ok {
+				// A committed update cannot be framed — terminate the
+				// subscriber so it reconnects and rebuilds (no silent
+				// loss).
 				cancel()
+				c.teardown()
 				return
 			}
-		}
-		if !c.send(EncodeSnapshotEnd(id)) {
-			cancel()
-			return
-		}
-		for ev := range events {
-			for _, frame := range EncodeDeltas(ev) {
+			for _, frame := range frames {
 				if !c.send(frame) {
 					cancel()
 					return
@@ -571,7 +599,12 @@ type connIO struct {
 	subscribed    bool
 }
 
-const outQueue = 256 // frames per connection (ADR-0005)
+const outQueue = 256 // frames per connection for LIVE deltas (ADR-0005)
+
+// snapshotDeliveryTimeout bounds the total backpressured delivery of
+// one full snapshot; a subscriber that cannot drain it in this window
+// is disconnected (slow-consumer rule).
+var snapshotDeliveryTimeout = 30 * time.Second
 
 func newConnIO(conn net.Conn) *connIO {
 	return &connIO{conn: conn, out: make(chan []byte, outQueue)}
@@ -606,6 +639,33 @@ func (c *connIO) send(frame []byte) bool {
 	}
 }
 
+// sendBlocking enqueues one frame, WAITING for queue space until the
+// deadline (snapshot backpressure): bounded memory without
+// disconnecting a healthy subscriber whose snapshot simply exceeds the
+// live-delta queue size. false means timeout/teardown.
+func (c *connIO) sendBlocking(frame []byte, deadline time.Time) bool {
+	f := append(frame, '\n')
+	for {
+		c.sendMu.Lock()
+		if c.closed {
+			c.sendMu.Unlock()
+			return false
+		}
+		select {
+		case c.out <- f:
+			c.sendMu.Unlock()
+			return true
+		default:
+		}
+		c.sendMu.Unlock()
+		if time.Now().After(deadline) {
+			c.teardown()
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // teardown stops the queue and closes the connection (idempotent).
 // Frames already enqueued are still drained by the writer before it
 // closes the socket, so terminal error frames reach the client.
@@ -622,15 +682,6 @@ func (c *connIO) teardown() {
 	c.cancelSubLocked()
 	if !started {
 		c.conn.Close() // no writer running; close directly
-	}
-}
-
-func (c *connIO) teardownIfSubscribed() {
-	c.subMu.Lock()
-	sub := c.subscribed
-	c.subMu.Unlock()
-	if sub {
-		c.teardown()
 	}
 }
 

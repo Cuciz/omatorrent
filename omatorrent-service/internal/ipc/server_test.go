@@ -706,11 +706,6 @@ type fakeSubs struct {
 }
 
 func (f *fakeSubs) Subscribe() ([]TorrentItem, <-chan DeltaEvent, func()) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.events == nil {
-		f.events = make(chan DeltaEvent, 8)
-	}
 	items := make([]TorrentItem, len(f.items))
 	copy(items, f.items)
 	cancel := func() {}
@@ -720,6 +715,11 @@ func (f *fakeSubs) Subscribe() ([]TorrentItem, <-chan DeltaEvent, func()) {
 func startSubServer(t *testing.T, subs Subscriptions) (*fakeSubs, string) {
 	t.Helper()
 	fs := subs.(*fakeSubs)
+	// Pre-create the events channel BEFORE the server starts so tests
+	// can push from any goroutine without racing lazy initialization.
+	if fs.events == nil {
+		fs.events = make(chan DeltaEvent, 4096)
+	}
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
@@ -783,8 +783,9 @@ func TestSubscriptionSnapshotAndDelta(t *testing.T) {
 		t.Fatalf("subscription frames: subscribed=%v begin=%v end=%v items=%d secondAccepted=%v lines=%v",
 			sawSubscribed, sawBegin, sawEnd, items, sawSecond, lines)
 	}
-	// Wire order is sorted by name: Alpha before Zeta.
-	if !strings.Contains(lines[3], `"name":"Alpha"`) {
+	// Wire order is sorted by name: Alpha before Zeta (lines: subscribed,
+	// begin, item0, item1, end).
+	if !strings.Contains(lines[2], `"name":"Alpha"`) || !strings.Contains(lines[3], `"name":"Zeta"`) {
 		t.Fatalf("snapshot not name-sorted: %v", lines)
 	}
 
@@ -856,7 +857,10 @@ func TestDeltaChunking(t *testing.T) {
 		name := strings.Repeat("n", 200) + string(rune('a'+i%26))
 		ev.Changed = append(ev.Changed, TorrentItem{Hash: fmt.Sprintf("%040d", i), Name: name, State: "downloading"})
 	}
-	frames := EncodeDeltas(ev)
+	frames, ok := EncodeDeltas(ev)
+	if !ok {
+		t.Fatal("normal delta failed to encode")
+	}
 	if len(frames) < 2 {
 		t.Fatalf("expected chunking, got %d frames", len(frames))
 	}
@@ -953,4 +957,171 @@ func mustCallerFile(t *testing.T) string {
 		t.Fatal("caller")
 	}
 	return f
+}
+
+// ---- review-round fixes: oversize handling + snapshot flow control ----
+
+func manyItems(n int) []TorrentItem {
+	items := make([]TorrentItem, n)
+	for i := range items {
+		items[i] = TorrentItem{
+			Hash: fmt.Sprintf("%040x", i), Name: fmt.Sprintf("Torrent %04d", i),
+			State: "downloading", Progress: float64(i%100) / 100, DlSpeed: int64(i),
+			UpSpeed: int64(i * 2), Eta: int64(3600 + i), Ratio: float64(i) / 10,
+			Category: "cat", Size: 1 << 20, Completed: 1 << 19,
+		}
+	}
+	return items
+}
+
+// A committed item that cannot fit the delta budget is never silently
+// dropped: EncodeDeltas refuses, and the server disconnects the
+// subscriber so it rebuilds from a fresh snapshot.
+func TestOversizeDeltaDisconnects(t *testing.T) {
+	pathological := TorrentItem{
+		Hash:     strings.Repeat("a", 64),
+		Name:     string([]rune{1, 1, 1, 1, 1, 1, 1, 1, 1, 1}), // heavy escaping
+		Category: string([]rune{1, 1, 1, 1, 1, 1, 1, 1, 1, 1}),
+		State:    "other",
+	}
+	// Amplify past the budget with a max-length control-char name.
+	pathological.Name = strings.Repeat("\u001f", 512)
+	pathological.Category = strings.Repeat("\u001f", 128)
+	b, _ := json.Marshal(pathological)
+	if len(b) < 3800 {
+		t.Fatalf("fixture not pathological enough: %d bytes", len(b))
+	}
+	if _, ok := EncodeDeltas(DeltaEvent{Seq: 1, Changed: []TorrentItem{pathological}}); ok {
+		t.Fatal("oversize item unexpectedly encodable")
+	}
+
+	// Server-level: subscriber receives the oversize event → disconnect.
+	subs := &fakeSubs{items: []TorrentItem{{Hash: "aa", Name: "n", State: "paused"}}}
+	_, path := startSubServer(t, subs)
+	c := dial(t, path)
+	c.handshake()
+	c.send(`{"type":"torrent.subscribe","id":1}`)
+	c.recvRaw() // drain snapshot
+	subs.events <- DeltaEvent{Seq: 2, Changed: []TorrentItem{pathological}}
+	// Connection must close (no silent loss, no partial frames applied).
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		buf := make([]byte, 1<<16)
+		if _, err := c.r.Read(buf); err != nil {
+			return
+		}
+	}
+	t.Fatal("subscriber not disconnected after unframmable delta")
+}
+
+// Snapshots far larger than the 256-frame live queue must be delivered
+// completely to a healthy reader (backpressure, not overflow).
+func TestSnapshotLargeNoOverflow(t *testing.T) {
+	for _, n := range []int{1, 256, 1000} {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			subs := &fakeSubs{items: manyItems(n)}
+			_, path := startSubServer(t, subs)
+			c := dial(t, path)
+			c.handshake()
+			c.send(`{"type":"torrent.subscribe","id":1}`)
+
+			// Read with a modest deadline; the reader is fast (local pipe).
+			var frames []string
+			deadline := time.Now().Add(10 * time.Second)
+			for len(frames) < n+3 && time.Now().Before(deadline) {
+				c.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+				line, err := c.r.ReadString('\n')
+				if err != nil {
+					continue
+				}
+				frames = append(frames, strings.TrimSuffix(line, "\n"))
+			}
+			if len(frames) != n+3 {
+				t.Fatalf("n=%d: received %d frames, want %d (subscribed+begin+%d items+end)", n, len(frames), n+3, n)
+			}
+			if !strings.Contains(frames[1], `"count":`) || !strings.Contains(frames[len(frames)-1], "snapshot.end") {
+				t.Fatalf("n=%d: frame sequence wrong: %v ...", n, frames[:3])
+			}
+			for _, f := range frames {
+				if len(f)+1 > MaxFrame {
+					t.Fatalf("n=%d: frame exceeds budget: %d bytes", n, len(f)+1)
+				}
+			}
+		})
+	}
+}
+
+// A subscriber that never drains a large snapshot is disconnected after
+// the bounded delivery window (slow-consumer rule still applies).
+func TestSlowSnapshotSubscriberDisconnected(t *testing.T) {
+	old := snapshotDeliveryTimeout
+	snapshotDeliveryTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { snapshotDeliveryTimeout = old })
+
+	subs := &fakeSubs{items: manyItems(1000)}
+	_, path := startSubServer(t, subs)
+	c := dial(t, path)
+	c.handshake()
+	c.send(`{"type":"torrent.subscribe","id":1}`)
+	// Do not read anything.
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		buf := make([]byte, 1<<16)
+		if _, err := c.r.Read(buf); err != nil {
+			return // closed
+		}
+	}
+	t.Fatal("slow snapshot subscriber was not disconnected")
+}
+
+// A change committed while the snapshot is being delivered must arrive
+// strictly AFTER snapshot.end (registration atomicity + ordering).
+func TestDeltaDuringSnapshotOrdering(t *testing.T) {
+	subs := &fakeSubs{items: manyItems(1000)}
+	_, path := startSubServer(t, subs)
+	c := dial(t, path)
+	c.handshake()
+	c.send(`{"type":"torrent.subscribe","id":1}`)
+	// Wait until delivery is in progress (queue backpressure with a
+	// non-reading client would stall it; so read slowly in chunks and
+	// push the delta mid-way).
+	go func() {
+		time.Sleep(50 * time.Millisecond) // snapshot delivery underway
+		subs.events <- DeltaEvent{Seq: 99, Changed: []TorrentItem{{Hash: "aa", Name: "changed", State: "paused"}}}
+	}()
+
+	var frames []string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		c.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		line, err := c.r.ReadString('\n')
+		if err != nil {
+			if len(frames) >= 1000+4 {
+				break
+			}
+			continue
+		}
+		frames = append(frames, strings.TrimSuffix(line, "\n"))
+		if strings.Contains(line, `"seq":99`) && len(frames) >= 1000+4 {
+			break
+		}
+	}
+	endIdx, deltaIdx := -1, -1
+	for i, f := range frames {
+		if strings.Contains(f, "snapshot.end") && endIdx < 0 {
+			endIdx = i
+		}
+		if strings.Contains(f, `"seq":99`) {
+			deltaIdx = i
+		}
+	}
+	if endIdx < 0 || deltaIdx < 0 {
+		t.Fatalf("missing frames: end=%d delta=%d total=%d", endIdx, deltaIdx, len(frames))
+	}
+	if deltaIdx < endIdx {
+		t.Fatalf("delta (frame %d) arrived before snapshot.end (%d)", deltaIdx, endIdx)
+	}
 }

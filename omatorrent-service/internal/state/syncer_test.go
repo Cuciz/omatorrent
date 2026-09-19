@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -56,18 +57,20 @@ func full(n int, state string) qbittorrent.Maindata {
 		t[mkHash(i)] = json.RawMessage(`{"name":"T` + string(rune('a'+i%26)) + string(rune('0'+i/26)) + `","state":"` + state + `","progress":0.5,"dlspeed":1,"upspeed":2,"eta":10,"ratio":1.0,"size":100,"completed":50}`)
 	}
 	return qbittorrent.Maindata{RID: 1, FullUpdate: true, Torrents: t,
-		ServerState: &qbittorrent.ServerState{DlInfoSpeed: 1, UpInfoSpeed: 2, ConnectionStatus: "connected"}}
+		ServerState: &qbittorrent.ServerState{DlInfoSpeed: ptrInt64(1), UpInfoSpeed: ptrInt64(2), ConnectionStatus: ptrString("connected")}}
 }
 
+// mkHash generates a UNIQUE valid v1 infohash (40 hex) for any index —
+// required for benchmark validity beyond 256 torrents (review finding:
+// the old two-nibble generator collided above 256).
 func mkHash(i int) string {
-	h := []byte("0000000000000000000000000000000000000000")
-	s := "0123456789abcdef"
-	h[0] = s[i%16]
-	h[1] = s[(i/16)%16]
-	return string(h)
+	return fmt.Sprintf("%040x", i)
 }
 
 func quietLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+func ptrInt64(v int64) *int64    { return &v }
+func ptrString(v string) *string { return &v }
 
 // runCycles drives s.cycle directly for deterministic tests.
 func runCycles(t *testing.T, s *Syncer, n int) bool {
@@ -115,7 +118,7 @@ func TestSyncIncrementalChangedAddedRemoved(t *testing.T) {
 			mkHash(5): json.RawMessage(`{"name":"NEW","state":"stalledUP","progress":1,"dlspeed":0,"upspeed":7,"eta":8640000,"ratio":3,"size":10,"completed":10}`),
 		},
 		TorrentsRemoved: []string{mkHash(1)},
-		ServerState:     &qbittorrent.ServerState{DlInfoSpeed: 5, UpInfoSpeed: 7, ConnectionStatus: "connected"},
+		ServerState:     &qbittorrent.ServerState{DlInfoSpeed: ptrInt64(5), UpInfoSpeed: ptrInt64(7), ConnectionStatus: ptrString("connected")},
 	}
 	fb.resps = append(fb.resps, delta)
 	if !s.cycle(context.Background(), time.Second) {
@@ -416,5 +419,70 @@ func TestCategoryCapped(t *testing.T) {
 	got := s.State().Torrents[mkHash(0)].Category
 	if len([]rune(got)) != CategoryCapRunes {
 		t.Fatalf("category runes = %d, want %d", len([]rune(got)), CategoryCapRunes)
+	}
+}
+
+// The hash generator must produce unique valid 40-hex hashes at every
+// size the benchmarks and tests use (review finding: 1,000-torrent
+// fixtures previously contained only 256 distinct hashes).
+func TestHashGeneratorUnique(t *testing.T) {
+	for _, n := range []int{10, 100, 1000, 10000} {
+		seen := make(map[string]struct{}, n)
+		for i := 0; i < n; i++ {
+			h := mkHash(i)
+			if !validHash(h) {
+				t.Fatalf("n=%d i=%d: %q is not a valid 40-hex hash", n, i, h)
+			}
+			if _, dup := seen[h]; dup {
+				t.Fatalf("n=%d i=%d: duplicate hash %q", n, i, h)
+			}
+			seen[h] = struct{}{}
+		}
+		if len(seen) != n {
+			t.Fatalf("n=%d: map holds %d", n, len(seen))
+		}
+	}
+}
+
+// server_state merge is presence-aware: only fields present in a
+// partial server_state update the state; explicit zero is a value,
+// absent preserves the last known one.
+func TestPartialServerStateMerge(t *testing.T) {
+	fb := &fakeBackend{resps: []qbittorrent.Maindata{full(1, "downloading")}}
+	s := New(fb, Options{}, quietLogger())
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.DlSpeed != 1 || st.UpSpeed != 2 || st.ConnectionStatus != "connected" {
+		t.Fatalf("baseline: %+v", st)
+	}
+
+	// Partial: only dl speed present (incl. explicit zero).
+	fb.resps = append(fb.resps, qbittorrent.Maindata{RID: 2,
+		Torrents: map[string]json.RawMessage{}, ServerState: &qbittorrent.ServerState{DlInfoSpeed: ptrInt64(0)}})
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.DlSpeed != 0 || st.UpSpeed != 2 || st.ConnectionStatus != "connected" {
+		t.Fatalf("partial dl-only: %+v", st)
+	}
+
+	// Partial: only up speed present.
+	fb.resps = append(fb.resps, qbittorrent.Maindata{RID: 3,
+		Torrents: map[string]json.RawMessage{}, ServerState: &qbittorrent.ServerState{UpInfoSpeed: ptrInt64(7)}})
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.DlSpeed != 0 || st.UpSpeed != 7 {
+		t.Fatalf("partial up-only: %+v", st)
+	}
+
+	// Absent server_state preserves everything.
+	fb.resps = append(fb.resps, qbittorrent.Maindata{RID: 4, Torrents: map[string]json.RawMessage{}})
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.DlSpeed != 0 || st.UpSpeed != 7 || st.ConnectionStatus != "connected" {
+		t.Fatalf("absent server_state: %+v", st)
+	}
+
+	// Full server_state replaces all present fields.
+	fb.resps = append(fb.resps, qbittorrent.Maindata{RID: 5, Torrents: map[string]json.RawMessage{},
+		ServerState: &qbittorrent.ServerState{DlInfoSpeed: ptrInt64(9), UpInfoSpeed: ptrInt64(8), ConnectionStatus: ptrString("firewalled")}})
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.DlSpeed != 9 || st.UpSpeed != 8 || st.ConnectionStatus != "firewalled" {
+		t.Fatalf("full server_state: %+v", st)
 	}
 }

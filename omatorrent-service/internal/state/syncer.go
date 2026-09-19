@@ -331,12 +331,20 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 		next.AppVersion, next.WebAPIVersion = prev.AppVersion, prev.WebAPIVersion
 	}
 
-	// server_state is optional on deltas; merge present fields.
+	// server_state is optional on deltas and may itself be partial:
+	// only fields actually present update the state; absent fields
+	// (including explicit-zero vs absent) keep the last known value.
 	next.DlSpeed, next.UpSpeed, next.ConnectionStatus = prev.DlSpeed, prev.UpSpeed, prev.ConnectionStatus
-	if md.ServerState != nil {
-		next.DlSpeed = md.ServerState.DlInfoSpeed
-		next.UpSpeed = md.ServerState.UpInfoSpeed
-		next.ConnectionStatus = md.ServerState.ConnectionStatus
+	if ss := md.ServerState; ss != nil {
+		if ss.DlInfoSpeed != nil {
+			next.DlSpeed = *ss.DlInfoSpeed
+		}
+		if ss.UpInfoSpeed != nil {
+			next.UpSpeed = *ss.UpInfoSpeed
+		}
+		if ss.ConnectionStatus != nil {
+			next.ConnectionStatus = *ss.ConnectionStatus
+		}
 	}
 	next.BackendOK = true
 
