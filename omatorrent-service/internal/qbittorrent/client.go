@@ -23,13 +23,16 @@ import (
 )
 
 // Sentinel error classes. Auth failure and ban are distinct per
-// docs/QBITTORRENT.md (wiki authentication section).
+// docs/QBITTORRENT.md (wiki authentication section). ErrConflict covers
+// backend refusals such as a duplicate/malformed add (HTTP 409 on
+// WebAPI ≥ 5.2-era backends — live-verified).
 var (
 	ErrUnreachable     = errors.New("qbittorrent: unreachable")
 	ErrBadCredentials  = errors.New("qbittorrent: bad credentials")
 	ErrBanned          = errors.New("qbittorrent: temporarily banned")
 	ErrUnauthorized    = errors.New("qbittorrent: unauthorized")
 	ErrUnexpectedState = errors.New("qbittorrent: unexpected response")
+	ErrConflict        = errors.New("qbittorrent: conflict")
 )
 
 // ServerState is the subset of sync/maindata server_state OmaTorrent
@@ -84,8 +87,19 @@ func New(baseURL, username, password string) (*Client, error) {
 		return nil, fmt.Errorf("qbittorrent: cookie jar: %w", err)
 	}
 	return &Client{
-		base:     u,
-		hc:       &http.Client{Timeout: 5 * time.Second, Jar: jar},
+		base: u,
+		// Redirects are refused (returned as-is and classified as
+		// unexpected responses): a mutating POST silently converted to a
+		// GET by a 302 would be reported accepted and never happen
+		// (review finding). qBittorrent's API never legitimately
+		// redirects.
+		hc: &http.Client{
+			Timeout: 5 * time.Second,
+			Jar:     jar,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		username: username,
 		password: password,
 	}, nil
@@ -175,6 +189,116 @@ func (c *Client) getText(ctx context.Context, path string) (string, error) {
 		v = string(r[:64])
 	}
 	return v, nil
+}
+
+// ---- Mutation endpoints (Phase 0.3; semantics live-verified in
+// docs/QBITTORRENT.md, mutation section) ----
+//
+// Every endpoint here ALWAYS targets exactly one hash and never sends the
+// `all` keyword (blast-radius rule). deleteFiles is always explicit.
+// The HTTP responses carry no per-torrent truth (200-empty in all
+// scenarios); the mutation service confirms outcomes via sync state.
+
+// StopTorrent stops (pauses) one torrent. Modern endpoint, WebAPI ≥ 2.11.0
+// (qBittorrent 5.x) — the legacy pause/resume endpoints no longer exist
+// there (live 404 on 5.2.3).
+func (c *Client) StopTorrent(ctx context.Context, hash string) error {
+	return c.postForm(ctx, "/api/v2/torrents/stop", url.Values{"hashes": {hash}})
+}
+
+// StartTorrent starts (resumes) one torrent. Modern endpoint, WebAPI ≥ 2.11.0.
+func (c *Client) StartTorrent(ctx context.Context, hash string) error {
+	return c.postForm(ctx, "/api/v2/torrents/start", url.Values{"hashes": {hash}})
+}
+
+// PauseTorrent is the pre-2.11.0 fallback for StopTorrent (qBittorrent 4.x).
+func (c *Client) PauseTorrent(ctx context.Context, hash string) error {
+	return c.postForm(ctx, "/api/v2/torrents/pause", url.Values{"hashes": {hash}})
+}
+
+// ResumeTorrent is the pre-2.11.0 fallback for StartTorrent (qBittorrent 4.x).
+func (c *Client) ResumeTorrent(ctx context.Context, hash string) error {
+	return c.postForm(ctx, "/api/v2/torrents/resume", url.Values{"hashes": {hash}})
+}
+
+// DeleteTorrent removes one torrent from the session; deleteFiles=true also
+// removes the downloaded data. The boolean is ALWAYS sent explicitly — the
+// daemon never relies on a backend default and never infers intent.
+func (c *Client) DeleteTorrent(ctx context.Context, hash string, deleteFiles bool) error {
+	return c.postForm(ctx, "/api/v2/torrents/delete", url.Values{
+		"hashes":      {hash},
+		"deleteFiles": {strconv.FormatBool(deleteFiles)},
+	})
+}
+
+// AddMagnet submits one magnet URI. On ≥ 5.2.0 backends the 200 response is
+// a structured JSON object whose added_torrent_ids are returned for the
+// caller's cross-check; legacy backends answer a plain body (echo nil).
+// A duplicate or malformed magnet is refused with 409 (live-verified) and
+// classified ErrConflict.
+func (c *Client) AddMagnet(ctx context.Context, magnet string) ([]string, error) {
+	body, err := c.postFormBody(ctx, "/api/v2/torrents/add", url.Values{"urls": {magnet}})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		AddedTorrentIDs []string `json:"added_torrent_ids"`
+	}
+	if json.Unmarshal(body, &resp) == nil && resp.AddedTorrentIDs != nil {
+		return resp.AddedTorrentIDs, nil
+	}
+	// Legacy body ("Ok." or empty on 4.x): acceptance without echo.
+	return nil, nil
+}
+
+// postForm performs an authenticated form POST and discards the body.
+func (c *Client) postForm(ctx context.Context, path string, form url.Values) error {
+	_, err := c.postFormBody(ctx, path, form)
+	return err
+}
+
+// postFormBody performs an authenticated form POST and returns the raw
+// body. A 403 with configured credentials triggers one re-login and retry
+// (SID expiry), mirroring fetch.
+func (c *Client) postFormBody(ctx context.Context, path string, form url.Values) ([]byte, error) {
+	body, err := c.doPostForm(ctx, path, form)
+	if errors.Is(err, ErrUnauthorized) && c.username != "" {
+		if lerr := c.Login(ctx); lerr != nil {
+			return nil, lerr
+		}
+		return c.doPostForm(ctx, path, form)
+	}
+	return body, err
+}
+
+func (c *Client) doPostForm(ctx context.Context, path string, form url.Values) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base.String()+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("qbittorrent: build %s: %w", path, err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnreachable, classifyTransport(err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		switch resp.StatusCode {
+		case http.StatusForbidden:
+			return nil, ErrUnauthorized
+		case http.StatusConflict:
+			return nil, ErrConflict
+		}
+		return nil, fmt.Errorf("%w: %s HTTP %d", ErrUnexpectedState, path, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<18))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s body: %v", ErrUnexpectedState, path, err)
+	}
+	return body, nil
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {

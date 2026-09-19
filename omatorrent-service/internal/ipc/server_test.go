@@ -48,7 +48,7 @@ func startServer(t *testing.T, h Handler) (*Server, string) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, h, nil, nil)
+	srv, err := New(path, h, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
 
-	srv1, err := New(path, &fakeHandler{health: true}, nil, nil)
+	srv1, err := New(path, &fakeHandler{health: true}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	}
 
 	// Restart: a fresh server can bind and the client handshakes again.
-	srv2, err := New(path, &fakeHandler{health: true}, nil, nil)
+	srv2, err := New(path, &fakeHandler{health: true}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestStaleSocketRefused(t *testing.T) {
 	}
 	f.Close()
 
-	srv, err := New(path, &fakeHandler{}, nil, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestStaleSocketRecovered(t *testing.T) {
 	path := filepath.Join(dir, "service.sock")
 	makeStaleSocket(t, path)
 
-	srv, err := New(path, &fakeHandler{health: true}, nil, nil)
+	srv, err := New(path, &fakeHandler{health: true}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +474,7 @@ func waitDialable(t *testing.T, path string) *client {
 func TestActiveDaemonRefused(t *testing.T) {
 	_, path := startServer(t, &fakeHandler{health: true}) // live daemon
 
-	srv2, err := New(path, &fakeHandler{}, nil, nil)
+	srv2, err := New(path, &fakeHandler{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +491,7 @@ func TestStaleSocketWrongPermsRefused(t *testing.T) {
 	makeStaleSocket(t, path)
 	os.Chmod(path, 0o666)
 
-	srv, err := New(path, &fakeHandler{}, nil, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestSocketSymlinkRefused(t *testing.T) {
 	path := filepath.Join(dir, "service.sock")
 	os.Symlink(real, path)
 
-	srv, err := New(path, &fakeHandler{}, nil, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +530,7 @@ func TestShutdownLeavesReplacedSocket(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, &fakeHandler{health: true}, nil, nil)
+	srv, err := New(path, &fakeHandler{health: true}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +581,7 @@ func TestHangingListenerRefused(t *testing.T) {
 		}
 	}()
 
-	srv, err := New(path, &fakeHandler{}, nil, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func TestSocketPermissions(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, &fakeHandler{}, nil, nil)
+	srv, err := New(path, &fakeHandler{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +656,7 @@ func TestShutdownClosesActiveClients(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, &fakeHandler{health: true}, nil, nil)
+	srv, err := New(path, &fakeHandler{health: true}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +723,7 @@ func startSubServer(t *testing.T, subs Subscriptions) (*fakeSubs, string) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, &fakeHandler{health: true}, fs, nil)
+	srv, err := New(path, &fakeHandler{health: true}, fs, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

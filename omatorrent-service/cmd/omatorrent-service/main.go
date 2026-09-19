@@ -14,11 +14,12 @@ import (
 
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/config"
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/ipc"
+	"github.com/Cuciz/omatorrent/omatorrent-service/internal/mutate"
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/qbittorrent"
 	"github.com/Cuciz/omatorrent/omatorrent-service/internal/state"
 )
 
-const version = "0.2.0-phase02"
+const version = "0.3.0-phase03"
 
 func main() {
 	var configPath, socketOverride string
@@ -49,13 +50,14 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 		return err
 	}
 	syncer := state.New(qbt, state.Options{}, log)
+	mutator := mutate.New(qbt, syncer, mutate.Options{}, log)
 
 	socketPath, err := ipc.ResolveSocketPath(cfg.IPC.SocketPath)
 	if err != nil {
 		return err
 	}
-	handler := &daemonHandler{syncer: syncer}
-	srv, err := ipc.New(socketPath, handler, handler, log)
+	handler := &daemonHandler{syncer: syncer, mutator: mutator}
+	srv, err := ipc.New(socketPath, handler, handler, handler, log)
 	if err != nil {
 		return err
 	}
@@ -66,6 +68,7 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
 	go syncer.Run(ctx)
+	go mutator.Run(ctx)
 
 	log.Info("omatorrent-service started",
 		"version", version,
@@ -89,10 +92,12 @@ func run(log *slog.Logger, configPath, socketOverride string) error {
 	return nil
 }
 
-// daemonHandler adapts the state syncer to the IPC interfaces: v1.0
-// status responses and v1.1 torrent subscriptions.
+// daemonHandler adapts the state syncer and mutation orchestrator to
+// the IPC interfaces: v1.0 status responses, v1.1 torrent
+// subscriptions, v1.2 mutations.
 type daemonHandler struct {
-	syncer *state.Syncer
+	syncer  *state.Syncer
+	mutator *mutate.Mutator
 }
 
 func (h *daemonHandler) Health() bool { return h.syncer.Health() }
@@ -149,4 +154,52 @@ func toItem(t state.Torrent) ipc.TorrentItem {
 		Size:      t.Size,
 		Completed: t.Completed,
 	}
+}
+
+// Submit implements ipc.Mutations: the mutator's Stage1 answer maps
+// one-to-one onto the wire shape (accepted / rejection code / replayed
+// terminal result).
+func (h *daemonHandler) Submit(r ipc.MutationRequest) ipc.MutationStage1 {
+	s1 := h.mutator.Submit(mutate.Request{
+		Action:      mutate.Action(r.Action),
+		Hash:        r.Hash,
+		URL:         r.URL,
+		DeleteFiles: r.DeleteFiles,
+		Ref:         r.Ref,
+	})
+	out := ipc.MutationStage1{
+		Outcome:  s1.Outcome,
+		Mutation: s1.Mutation,
+		Action:   string(s1.Action),
+		Hash:     s1.Hash,
+	}
+	if s1.Replay != nil {
+		out.Replay = &ipc.MutationResult{
+			Mutation: s1.Replay.Mutation,
+			Action:   string(s1.Replay.Action),
+			Hash:     s1.Replay.Hash,
+			Status:   s1.Replay.Status,
+		}
+	}
+	return out
+}
+
+// Results implements ipc.Mutations: forwards the mutator's broadcast
+// with bounded buffering (slow IPC consumers are dropped, consistent
+// with the ADR-0005 slow-consumer rule).
+func (h *daemonHandler) Results() (<-chan ipc.MutationResult, func()) {
+	ch := make(chan ipc.MutationResult, 16)
+	src, cancel := h.mutator.Results()
+	go func() {
+		defer close(ch)
+		for r := range src {
+			select {
+			case ch <- ipc.MutationResult{Mutation: r.Mutation, Action: string(r.Action), Hash: r.Hash, Status: r.Status}:
+			default:
+				cancel()
+				return
+			}
+		}
+	}()
+	return ch, cancel
 }

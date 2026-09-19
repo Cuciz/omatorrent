@@ -5,42 +5,39 @@ current state. Keep under ~60 lines. Do not paste conversations.
 
 ## CURRENT OBJECTIVE
 
-Phase 0 end-to-end proof complete; PR ready for review.
+Phase 0.3 (essential torrent actions, issue #5) implemented on
+`feat/phase03-essential-actions`; PR open for external review, NOT merged.
 
 ## COMPLETED
 
-- Branch `feat/phase0-foundation` (from main). GitHub issue #1.
-- Daemon: `omatorrent-service/` (ipc/qbittorrent/state/config, tests,
-  ot-probe). IPC v1 contract (ADR-0004 + docs/IPC.md).
-- Plugin: `plugins/local.omatorrent/` bar proof; installed + enabled in
-  `~/.config/omarchy/plugins/`, live in the bar.
-- systemd user service installed at
-  `~/.config/systemd/user/omatorrent-service.service`, running
-  (`systemctl --user start`, NOT boot-enabled — user decision).
-- Evidence: docs/agent/PHASE0.md; screenshots docs/screenshots/.
+- Phase 0 (merged, PR #2); Phase 0.2 (merged, PR #4 @ 3e090d5, issue #3
+  closed; final record docs/agent/PHASE02.md incl. merge SHA).
+- Phase 0.3: live-verified qBittorrent mutation semantics
+  (docs/QBITTORRENT.md), ADR-0006 IPC v1.2 staged mutation contract,
+  daemon mutation layer (internal/qbittorrent mutations + internal/mutate
+  orchestration + IPC v1.2), panel actions/add-magnet/removal
+  confirmations (manifest 0.3.0), extended quickshell smoke
+  (disposable-torrent lifecycle), docs + PHASE03 record.
+- Daemon 0.3.0-phase03 deployed via user systemd unit and validated live
+  (panel live/degraded/recovered screenshots; journal clean).
+- Reviews: architecture/security/QA run post-implementation (verdicts in
+  docs/agent/PHASE03.md and the PR).
 
 ## UNRESOLVED DECISIONS
 
 - Public plugin namespace (plugins.omarchy.org) — user/marketplace.
 - Boot-enable the user service (`systemctl --user enable`) — user.
-- Permanent Go install via `sudo pacman -S go` (agent had no sudo) — user.
 
 ## BLOCKERS
 
-- None for Phase 0. Reviews: verdicts to be recorded in the PR.
+- None known. Phase 0.3 PR awaits external review; do NOT auto-merge.
 
-## AFFECTED FILES
+## TESTS ACTUALLY RUN (Phase 0.3, 2026-09-19)
 
-Everything under `feat/phase0-foundation` vs main (see PR diff).
-
-## TESTS ACTUALLY RUN
-
-go build/vet/test -race (PASS); tools/validate_harness.py (PASS 82/82);
-tools/test_guard_hook.sh (PASS 39/39); omarchy plugin validate (PASS);
-tools/test_quickshell.sh (PASS); live ot-probe + bar observation (PASS).
-Full matrix: docs/agent/PHASE0.md.
-
-## NEXT EXACT ACTION
-
-Review/merge the Phase 0 PR; then start 0.1/0.2 planning (panel +
-incremental sync via `sync/maindata` rid).
+go build/vet/gofmt/test -race (PASS); harness 82/82; guard 39/39;
+plugin validate (PASS); tools/test_quickshell.sh incl. 10-stage v1.2
+mutation lifecycle on a disposable magnet (PASS); live research probes
+with disposable torrent + no-op hashes (user torrents 3 → 3); secret
+scan (clean); shell restart + journal audit (clean). Live
+remove-with-files on a torrent WITH real files: NOT RUN (no safe
+target); legacy < 2.11.0 backend path: fixture-only.

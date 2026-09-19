@@ -1,0 +1,1 @@
+{"type":"mutation.rejected","protocol":1,"id":4,"code":"stale_torrent"}

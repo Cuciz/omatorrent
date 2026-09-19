@@ -10,6 +10,9 @@ decision; implementation must conform until an ADR explicitly supersedes it.
 | [0001](0001-quickshell-daemon-boundary.md) | Quickshell is presentation only; business logic lives in a separate daemon | ACCEPTED |
 | [0002](0002-go-service.md) | `omatorrent-service` is implemented in Go | ACCEPTED |
 | [0003](0003-unix-socket-ipc.md) | Shell↔daemon communication uses a versioned Unix-domain IPC protocol | ACCEPTED |
+| [0004](0004-phase0-ipc-v1.md) | IPC v1: NDJSON frames, strict schema, Unix-socket lifecycle | ACCEPTED |
+| [0005](0005-ipc-v1-1-torrent-state.md) | IPC v1.1: read-only torrent state delivery via subscription | ACCEPTED |
+| [0006](0006-ipc-v1-2-mutations.md) | IPC v1.2: staged torrent mutation contract (accepted/result, ref replay, explicit delete_files) | ACCEPTED |
 
 ## Format
 

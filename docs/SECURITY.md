@@ -60,19 +60,42 @@ recorded in docs/agent/PHASE0.md per change.
   live-delta outbound queue bounded at 256 frames per connection (the
   initial snapshot uses bounded backpressure instead) — a slow or
   malicious subscriber is disconnected, never able to grow daemon
-  memory; no mutation operations exist. Version probes and names never
-  include secrets; hashes/names/state only.
+  memory. Version probes and names never include secrets;
+  hashes/names/state only.
+- v1.2 mutations (ADR-0006, Phase 0.3): the protocol's only
+  backend-mutating surface. Abuse bounds: strict schemas (hashes
+  40/64-hex, magnet URLs ≤ 2048 bytes, refs ≤ 128 chars of a fixed
+  charset — all enforced at parse time before any backend call); one
+  mutation in flight per connection (lockstep handlers) and a
+  daemon-wide cap of 4 concurrent submissions (excess → `busy`); the
+  completed-ref ring is bounded (64) so replay traffic cannot grow
+  memory; mutation submission is bounded at 5 s and reconciliation at
+  10 s per mutation. Rejections never echo payloads (anti-reflection);
+  no secrets cross the boundary. Destructive intent requires an
+  explicit boolean (`delete_files`) — ambiguous or missing values are
+  protocol violations, and the adapter always forwards the boolean
+  explicitly to qBittorrent (never a backend default, never `all`
+  keyword, one hash per call).
 - Same-UID processes are inside the filesystem trust boundary
   (documented in ADR-0004): a same-user attacker can race path checks.
   Cross-UID protection is what the 0600/0700 permissions provide.
 
 ## Destructive operations [DECISION]
 
-- Deletion with file removal requires an explicit confirmation flag in
-  the IPC contract and UI confirmation; path validation prevents escape
-  from the content directory; stale-state mis-targeting must be
-  prevented. (No destructive operations exist before 0.3; IPC v1 has no
-  mutations.)
+- Implemented in Phase 0.3 per ADR-0006: removal WITHOUT files is a
+  normal confirmed action; removal WITH files is contractually and
+  visually distinct — an explicit, separately confirmed
+  `delete_files: true` boolean at the IPC layer (missing/non-boolean ⇒
+  connection-closing protocol violation; no defaulting, no inference),
+  an urgent-colored separate confirm path in the panel, an explicit
+  `deleteFiles` form value to qBittorrent, and stale-state mis-targeting
+  prevented by `stale_torrent` validation against committed state
+  before any submission. Replay safety: a completed ref can never
+  re-execute (recorded terminal outcome returned); remove is never
+  retried blindly after an ambiguous timeout. Residual documented
+  limit: ref deduplication is per-daemon-process, not durable across
+  daemon restarts (clients must require fresh user action; see
+  ADR-0006).
 
 ## VPN safety model [DECISION]
 
