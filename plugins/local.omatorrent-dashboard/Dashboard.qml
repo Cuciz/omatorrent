@@ -49,9 +49,14 @@ Item {
   property var active: []
   property int nextId: 1
   property int pendingId: -1
+  property string pendingKind: ""
   property real pendingSince: 0
   property int backoffMs: 1000
   property bool helloSent: false
+
+  // ---- v1.4 connection status (Phase 0.5): host label + truthful
+  //      degraded classes; display-safe fields only (never a secret).
+  property var connInfo: null
 
   readonly property string xdgRuntime: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string socketPath: xdgRuntime !== "" ? xdgRuntime + "/omatorrent/service.sock" : ""
@@ -90,15 +95,25 @@ Item {
   }
 
   function requestDashboard() {
-    if (pendingId !== -1) return
+    if (pendingKind !== "") return
+    pendingKind = "dashboard"
     pendingId = nextId++
     pendingSince = Date.now()
     send({ type: "dashboard.status", id: pendingId })
   }
 
+  function requestConnection() {
+    if (pendingKind !== "") return
+    pendingKind = "connection"
+    pendingId = nextId++
+    pendingSince = Date.now()
+    send({ type: "connection.status", id: pendingId })
+  }
+
   function resetSession() {
     helloSent = false
     pendingId = -1
+    pendingKind = ""
     daemonUp = false
     live = false
     haveLastKnown = false
@@ -122,8 +137,9 @@ Item {
         requestDashboard()
         break
       case "dashboard.status":
-        if (typeof msg.id !== "number" || msg.id !== pendingId) return
+        if (pendingKind !== "dashboard" || typeof msg.id !== "number" || msg.id !== pendingId) return
         pendingId = -1
+        pendingKind = ""
         daemonUp = true
         if (msg.qbittorrent === "ok") {
           live = true
@@ -136,6 +152,7 @@ Item {
           counts = msg.counts && typeof msg.counts === "object" ? msg.counts : ({})
           aggregate = msg.aggregate && typeof msg.aggregate === "object" ? msg.aggregate : ({})
           active = Array.isArray(msg.active) ? msg.active : []
+          requestConnection() // chained (lockstep): host label + classes
         } else {
           // Degraded: speeds/active are unknown — never fabricated.
           live = false
@@ -155,6 +172,13 @@ Item {
             aggregate = ({})
           }
         }
+        requestConnection() // chained (lockstep): host label + classes
+        break
+      case "connection.status":
+        if (pendingKind !== "connection" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        connInfo = msg
         break
       case "error":
         break
@@ -198,9 +222,41 @@ Item {
   readonly property color urgent: Color.urgent
   readonly property var borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
 
-  readonly property string headerState: !daemonUp
-    ? "daemon offline"
-    : (live ? "connected" : (haveLastKnown ? "qBittorrent unreachable" : "waiting for first sync"))
+  readonly property string connClass: connInfo ? (typeof connInfo.status === "string" ? connInfo.status : "") : ""
+
+  // Differentiated degraded classes (ASCII I of the Phase 0.5 design):
+  // never a fake "offline" when authentication is the actual failure.
+  readonly property string headerState: {
+    if (!daemonUp) return "daemon offline"
+    if (live) return connInfo && connInfo.insecure === true ? "connected (insecure)" : "connected"
+    switch (connClass) {
+      case "auth_required": return "authentication required"
+      case "auth_failed": return "authentication failed"
+      case "banned": return "temporarily banned"
+      case "tls_untrusted": return "secure connection failed"
+      case "tls_hostname": return "certificate hostname mismatch"
+      case "secrets_unavailable": return "credential store locked"
+      case "invalid_configuration": return "invalid connection settings"
+    }
+    return haveLastKnown ? "qBittorrent unreachable" : "waiting for first sync"
+  }
+
+  // Display-safe backend identity (never username/secret/full URL).
+  readonly property string connHostLabel: {
+    if (!connInfo || connInfo.mode !== "remote") return ""
+    return typeof connInfo.host === "string" ? connInfo.host : ""
+  }
+
+  readonly property bool connAuthLost: {
+    switch (connClass) {
+      case "auth_required":
+      case "auth_failed":
+      case "secrets_unavailable":
+      case "invalid_configuration":
+        return true
+    }
+    return false
+  }
 
   // Versions are provenance of the last live frame; while the daemon
   // is offline nothing may read as current knowledge.
@@ -341,6 +397,16 @@ Item {
                 font.pixelSize: Style.font.caption
                 font.family: Style.font.family
               }
+              Text {
+                visible: root.connHostLabel !== ""
+                text: root.connHostLabel
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(5)
+                anchors.top: titleText.bottom
+                color: root.dim
+                font.pixelSize: Style.font.caption
+                font.family: Style.font.family
+              }
             }
 
             // ---- Degraded callouts (agents-style urgent tint).
@@ -364,7 +430,7 @@ Item {
               }
             }
             BorderSurface {
-              visible: root.daemonUp && !root.live
+              visible: root.daemonUp && !root.live && !root.connAuthLost
               width: parent.width
               implicitHeight: degradedText.implicitHeight + Style.space(8)
               radius: Style.cornerRadius
@@ -380,6 +446,86 @@ Item {
                   : "qBittorrent unreachable — waiting for first sync"
                 color: root.urgent
                 font.pixelSize: Style.font.body
+                font.family: Style.font.family
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+              }
+            }
+            // Authentication/credential lost (ASCII I): truthful class,
+            // last-known data stays available, live speeds never shown.
+            BorderSurface {
+              visible: root.daemonUp && !root.live && root.connAuthLost
+              width: parent.width
+              implicitHeight: authLostCol.implicitHeight + Style.space(8)
+              radius: Style.cornerRadius
+              color: Util.alpha(root.urgent, 0.10)
+              borderSpec: Border.flat(Util.alpha(root.urgent, 0.35), 1)
+
+              Column {
+                id: authLostCol
+                anchors.centerIn: parent
+                width: parent.width - Style.space(12)
+                spacing: Style.space(4)
+
+                Text {
+                  width: parent.width
+                  text: root.connClass === "auth_required" || root.connClass === "auth_failed"
+                    ? "Authentication is required to continue."
+                    : (root.connClass === "secrets_unavailable"
+                        ? "The credential store is unavailable or locked."
+                        : "The stored connection settings are invalid.")
+                  color: root.urgent
+                  font.pixelSize: Style.font.body
+                  font.family: Style.font.family
+                  horizontalAlignment: Text.AlignHCenter
+                  wrapMode: Text.WordWrap
+                }
+                Text {
+                  visible: root.haveLastKnown
+                  width: parent.width
+                  text: "Last known torrent data — state may be stale"
+                  color: root.dim
+                  font.pixelSize: Style.font.caption
+                  font.family: Style.font.family
+                  horizontalAlignment: Text.AlignHCenter
+                }
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: "Connection settings"
+                  color: Color.accent
+                  opacity: 0.95
+                  font.pixelSize: Style.font.body
+                  font.family: Style.font.family
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      // First-party routing: summons cannot carry
+                      // payloads, so open the panel (its gear opens the
+                      // canonical settings surface one click away).
+                      root.dismiss()
+                      Util.execDetached("omarchy-shell shell summon local.omatorrent")
+                    }
+                  }
+                }
+              }
+            }
+            // Acknowledged insecure HTTP: prominently marked.
+            BorderSurface {
+              visible: root.live && root.connInfo && root.connInfo.insecure === true
+              width: parent.width
+              implicitHeight: insecureText.implicitHeight + Style.space(8)
+              radius: Style.cornerRadius
+              color: Util.alpha(root.urgent, 0.10)
+              borderSpec: Border.flat(Util.alpha(root.urgent, 0.35), 1)
+
+              Text {
+                id: insecureText
+                anchors.centerIn: parent
+                width: parent.width - Style.space(12)
+                text: "Insecure connection — this backend runs acknowledged plain HTTP"
+                color: root.urgent
+                font.pixelSize: Style.font.caption
                 font.family: Style.font.family
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
@@ -530,6 +676,21 @@ Item {
               spacing: Style.space(4)
 
               Text {
+                text: "Connection settings"
+                color: Color.accent
+                opacity: 0.9
+                font.pixelSize: Style.font.body
+                font.family: Style.font.family
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.dismiss()
+                    Util.execDetached("omarchy-shell shell summon local.omatorrent")
+                  }
+                }
+              }
+              Text {
                 text: "Open torrent panel"
                 color: Color.accent
                 opacity: 0.9
@@ -550,7 +711,7 @@ Item {
                   }
                 }
               }
-              Item { width: parent.width - openPanelText.implicitWidth - escText.implicitWidth - Style.space(16); height: 1 }
+              Item { width: parent.width - openPanelText.implicitWidth - escText.implicitWidth - Style.space(36); height: 1 }
               Text {
                 id: escText
                 anchors.verticalCenter: parent.verticalCenter

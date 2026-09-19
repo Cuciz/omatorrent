@@ -82,9 +82,9 @@ func exchange(t *testing.T, path string, req string) []string {
 
 func TestConnectionStatusWire(t *testing.T) {
 	fc := &fakeConnections{status: ConnectionStatusData{
-		Configured: true, Mode: "remote", Host: "qbittorrent.home.arpa",
+		Configured: true, Mode: "remote", URL: "https://qbittorrent.home.arpa:443", Host: "qbittorrent.home.arpa",
 		Transport: "https", Insecure: false, Username: "clement", HasSecret: true,
-		TLSMode: "pin", Status: "connected", Detail: "", Epoch: 2,
+		TLSMode: "pin", Pin: strings.Repeat("ab", 32), Status: "connected", Detail: "", Epoch: 2,
 	}}
 	_, path := startConnServer(t, fc)
 	lines := exchange(t, path, `{"type":"connection.status","id":7}`)
@@ -97,9 +97,10 @@ func TestConnectionStatusWire(t *testing.T) {
 	}
 	want := map[string]any{
 		"type": "connection.status", "protocol": float64(1), "id": float64(7),
-		"configured": true, "mode": "remote", "host": "qbittorrent.home.arpa",
+		"configured": true, "mode": "remote",
+		"url": "https://qbittorrent.home.arpa:443", "host": "qbittorrent.home.arpa",
 		"transport": "https", "insecure": false, "username": "clement",
-		"has_secret": true, "tls_mode": "pin", "status": "connected",
+		"has_secret": true, "tls_mode": "pin", "pin": strings.Repeat("ab", 32), "status": "connected",
 		"detail": "", "epoch": float64(2),
 	}
 	if len(resp) != len(want) {

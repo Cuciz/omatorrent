@@ -386,7 +386,9 @@ Response (exact key set):
  "username":"","has_secret":false,"tls_mode":"system",
  "status":"connected","detail":"","epoch":1}
 ```
-- `mode` — `local` (loopback URL) or `remote` (derived, never stored).
+- `mode` — `local` (loopback URL) or `remote` (derived, never stored);
+  `url` — the validated origin (non-secret; the settings form prefills
+  it — like `username`, status surfaces display only `host`).
 - `host` — display-safe label `host[:port][/path]`, capped at 128 runes;
   never a userinfo, secret or full URL echo.
 - `transport` — `http` | `https`; `insecure` — true iff non-loopback

@@ -175,12 +175,14 @@ func (m *Manager) Profile() Profile {
 type Status struct {
 	Configured bool
 	Mode       string // local | remote
+	URL        string // validated origin (non-secret)
 	Host       string
 	Transport  string
 	Insecure   bool
 	Username   string
 	HasSecret  bool
 	TLSMode    string
+	Pin        string
 	Status     string
 	Detail     string
 	Epoch      uint64
@@ -198,7 +200,9 @@ func (m *Manager) Status() Status {
 		Username:   p.Username,
 		HasSecret:  hasSecret,
 		TLSMode:    p.TLSMode,
+		Pin:        p.PinFingerprint,
 		Epoch:      epoch,
+		URL:        p.URL,
 		Host:       truncateRunes(ep.Host, 128),
 		Transport:  ep.Scheme,
 	}

@@ -61,6 +61,23 @@ Panel {
   property string confirmHash: ""
   property string confirmName: ""
   property int mutSeq: 0 // ref uniqueness within this panel instance
+
+  // ---- Connection (v1.4, ADR-0008): status poll + settings mode.
+  //      connInfo mirrors the daemon's connection.status payload; the
+  //      stored secret NEVER crosses back (has_secret only).
+  property var connInfo: null
+  property bool settingsOpen: false
+  property string addrText: ""
+  property string userText: ""
+  property string passText: ""       // transient; cleared after the frame is written
+  property bool forgetSecret: false  // explicit delete intent (replaces keep)
+  property string pinCandidate: ""   // fingerprint offered by a failed untrusted test
+  property bool pinTrusted: false    // a pinned test has succeeded
+  property bool allowInsecure: false // user acknowledged non-loopback HTTP
+  property var testResult: null      // last connection.test payload
+  property bool connBusy: false      // test/configure in flight
+  property string connError: ""
+  property real connErrorSince: 0
   // Watchdog: a pending mutation whose terminal never arrives (e.g. a
   // result lost while the daemon's delivery pump resubscribed) is
   // resolved by re-sending the SAME ref (daemon replays the recorded
@@ -175,6 +192,35 @@ Panel {
     return messages[code] || "Action failed"
   }
 
+  function testStatusText() {
+    if (!testResult) return ""
+    const labels = {
+      auth_required: "Authentication required",
+      auth_failed: "Authentication failed — host reached, credentials rejected",
+      banned: "Temporarily banned by the host",
+      tls_untrusted: "Certificate verification failed",
+      tls_hostname: "Certificate not valid for this host",
+      secrets_unavailable: "Credential store unavailable",
+      insecure_http: "Plain HTTP to a remote host",
+      invalid_configuration: "Invalid address",
+      unreachable: "Host unreachable",
+      backend_error: "Unexpected response from host"
+    }
+    return labels[testResult.status] || "Connection failed"
+  }
+
+  function connRejectionBanner(code) {
+    const messages = {
+      invalid_url: "Invalid address or security settings",
+      insecure_http: "Plain HTTP needs explicit acknowledgement",
+      pin_unknown: "Certificate must be re-tested first",
+      secrets_unavailable: "Credential store unavailable or locked",
+      mutations_pending: "Wait for pending actions, then save again",
+      storage_error: "Saving the configuration failed"
+    }
+    return messages[code] || "Configuration rejected"
+  }
+
   function applyTerminalEffect(t) {
     // Ambiguous, not failed: committed state remains the authority.
     mutError = t.status === "timeout" ? "Action result unknown — state will tell" : ""
@@ -207,6 +253,79 @@ Panel {
         mutStateChanged()
       }
       return // one watchdog query at a time (lockstep)
+    }
+  }
+
+  // ---- Connection client discipline: one in flight (pendingKind
+  //      extends to "connection" | "test" | "configure").
+  function requestConnectionStatus() {
+    if (pendingKind !== "") return
+    pendingKind = "connection"
+    pendingId = nextId++
+    pendingSince = Date.now()
+    send({ type: "connection.status", id: pendingId })
+  }
+
+  function connTlsMode() {
+    return pinTrusted && pinCandidate !== "" ? "pin" : "system"
+  }
+
+  function runTest() {
+    if (pendingKind !== "" || !sock.connected || !helloSent) return
+    const addr = addrText.trim()
+    if (addr === "") return
+    connBusy = true
+    connError = ""
+    pendingKind = "test"
+    pendingId = nextId++
+    pendingSince = Date.now()
+    const msg = { type: "connection.test", id: pendingId, url: addr,
+                  username: userText.trim(), tls_mode: connTlsMode() }
+    if (passText !== "") msg.password = passText
+    else if (userText.trim() !== "" && connInfo && connInfo.has_secret === true) msg.use_stored_password = true
+    if (connTlsMode() === "pin") msg.pin = pinCandidate
+    if (allowInsecure) msg.allow_insecure_http = true
+    send(msg)
+    if (passText !== "") passText = "" // transient; never kept in QML longer than the send
+  }
+
+  function saveConnection() {
+    if (pendingKind !== "" || !sock.connected || !helloSent) return
+    const addr = addrText.trim()
+    if (addr === "") return
+    const action = passText !== "" ? "replace" : (forgetSecret ? "delete" : "keep")
+    connBusy = true
+    connError = ""
+    pendingKind = "configure"
+    pendingId = nextId++
+    pendingSince = Date.now()
+    const msg = { type: "connection.configure", id: pendingId, url: addr,
+                  username: userText.trim(), secret_action: action,
+                  tls_mode: connTlsMode() }
+    if (action === "replace") msg.password = passText
+    if (connTlsMode() === "pin") msg.pin = pinCandidate
+    if (allowInsecure) msg.allow_insecure_http = true
+    send(msg)
+    if (action === "replace") passText = ""
+  }
+
+  function openSettings() {
+    if (!settingsOpen) {
+      settingsOpen = true
+      // Prefill from daemon truth (non-secret metadata only).
+      if (connInfo) {
+        addrText = typeof connInfo.url === "string" ? connInfo.url : addrText
+        userText = typeof connInfo.username === "string" ? connInfo.username : userText
+        // An active pin persists across saves: keep its fingerprint so
+        // Save re-sends pin mode instead of silently downgrading trust.
+        if (connInfo.tls_mode === "pin" && typeof connInfo.pin === "string" && connInfo.pin !== "") {
+          pinCandidate = connInfo.pin
+          pinTrusted = true
+        }
+      }
+      testResult = null
+      connError = ""
+      requestConnectionStatus()
     }
   }
 
@@ -378,8 +497,56 @@ Panel {
         dlSpeed = msg.dl_speed || 0
         upSpeed = msg.up_speed || 0
         // Exactly one request in flight: subscribe only after the status
-        // response, and only once per session.
+        // response, and only once per session; connection status is
+        // chained after both (settings/degraded banners need it).
         if (!subscribed) requestSubscribe()
+        else requestConnectionStatus()
+        break
+      case "connection.status":
+        if (pendingKind !== "connection" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        connInfo = msg
+        break
+      case "connection.test":
+        if (pendingKind !== "test" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        connBusy = false
+        testResult = msg
+        // An untrusted certificate offers its fingerprint: the explicit
+        // trust flow (pin) starts from THIS daemon-captured value; the
+        // certificate bytes never cross the wire (ADR-0008).
+        if (msg.result !== "ok" && msg.status === "tls_untrusted" &&
+            typeof msg.offered_fingerprint === "string" && msg.offered_fingerprint !== "") {
+          if (pinCandidate !== msg.offered_fingerprint) {
+            pinCandidate = msg.offered_fingerprint
+            pinTrusted = false
+          }
+        }
+        break
+      case "connection.configured":
+        if (pendingKind !== "configure" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        connBusy = false
+        connError = ""
+        forgetSecret = false
+        testResult = null
+        // The daemon switches the backend epoch: the subscription
+        // delivers the old torrents as removals plus a fresh snapshot
+        // of the new backend — nothing stale survives (ADR-0008 §8).
+        requestConnectionStatus()
+        break
+      case "connection.rejected":
+        if (pendingKind !== "configure" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        connBusy = false
+        connError = connRejectionBanner(typeof msg.code === "string" ? msg.code : "")
+        connErrorSince = Date.now()
+        // A pin that lost its captured certificate: re-test recaptures.
+        if (msg.code === "pin_unknown") pinTrusted = false
         break
       case "torrent.subscribed":
         if (pendingKind !== "subscribe" || typeof msg.id !== "number" || msg.id !== pendingId) return
@@ -475,7 +642,63 @@ Panel {
   }
 
   readonly property color stateColor: backendOk ? Color.accent : (bar ? bar.urgent : Color.urgent)
-  readonly property string headerState: !daemonUp ? "daemon offline" : (backendOk ? "connected" : "qBittorrent unreachable")
+
+  // Connection-class header text (v1.4): differentiated degraded
+  // states, display-safe host label for remote backends. Never a
+  // username, password or full URL.
+  readonly property string connHostLabel: {
+    if (!connInfo) return ""
+    if (connInfo.mode !== "remote") return ""
+    return typeof connInfo.host === "string" ? connInfo.host : ""
+  }
+  readonly property string headerState: {
+    if (!daemonUp) return "daemon offline"
+    if (connInfo) {
+      switch (connInfo.status) {
+        case "connected": return connHostLabel !== "" ? "connected · " + connHostLabel : "connected"
+        case "auth_required": return "authentication required"
+        case "auth_failed": return "authentication failed"
+        case "banned": return "temporarily banned"
+        case "tls_untrusted": return "secure connection failed"
+        case "tls_hostname": return "certificate hostname mismatch"
+        case "secrets_unavailable": return "credential store locked"
+        case "invalid_configuration": return "invalid connection settings"
+      }
+      if (connInfo.insecure === true && connInfo.status === "connected") {
+        return "connected (insecure) · " + (connHostLabel !== "" ? connHostLabel : "remote")
+      }
+    }
+    return backendOk ? "connected" : "qBittorrent unreachable"
+  }
+
+  // Degraded connection callouts (truthful, one line + settings path).
+  readonly property bool connNeedsAttention: {
+    if (!daemonUp || !connInfo) return false
+    switch (connInfo.status) {
+      case "auth_required":
+      case "auth_failed":
+      case "banned":
+      case "tls_untrusted":
+      case "tls_hostname":
+      case "secrets_unavailable":
+      case "invalid_configuration":
+        return true
+    }
+    return false
+  }
+  readonly property string connAttentionText: {
+    if (!connInfo) return ""
+    switch (connInfo.status) {
+      case "auth_required": return "qBittorrent requires authentication and none is configured."
+      case "auth_failed": return "qBittorrent rejected the configured credentials."
+      case "banned": return "Too many failed logins — the backend banned this machine temporarily."
+      case "tls_untrusted": return "Certificate verification failed. The connection was NOT downgraded."
+      case "tls_hostname": return "The certificate is not valid for this host. The connection was NOT downgraded."
+      case "secrets_unavailable": return "The credential store is unavailable or locked."
+      case "invalid_configuration": return "The stored connection settings are invalid."
+    }
+    return ""
+  }
 
   function open() {
     root.controller.show()
@@ -492,7 +715,8 @@ Panel {
     open: root.opened
     padding: Style.spacing.panelPadding
     contentWidth: Style.space(360)
-    contentHeight: Style.space(440)
+    contentHeight: root.settingsOpen ? Style.space(430)
+      : Style.space(440)
       + (root.addOpen ? Style.space(12) : 0)
       + (root.confirmHash !== "" ? Style.space(13) : 0)
       + (root.mutError !== "" ? Style.space(6) : 0)
@@ -538,6 +762,25 @@ Panel {
             font.pixelSize: Style.font.caption
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
           }
+          // Connection settings entry (Phase 0.5): one canonical
+          // settings surface as a mode of this panel (native pattern;
+          // ADR-0008 §10).
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.settingsOpen ? "\u2190" : "\u2699"
+            color: root.settingsOpen ? Color.accent : root.barForeground
+            opacity: 0.8
+            font.pixelSize: Style.font.body
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                if (root.settingsOpen) root.settingsOpen = false
+                else root.openSettings()
+              }
+            }
+          }
           // Dashboard entry (Phase 0.4): opens the companion overlay
           // plugin through the first-party shell routing (the omarchy
           // menu bar-widget pattern) — this popout closes with it.
@@ -580,8 +823,54 @@ Panel {
           }
         }
 
+        // ---- Connection attention banner (auth/TLS/store failures:
+        //      truthful, differentiated, one path to settings — ASCII
+        //      projections B/C of ADR-0008).
+        Column {
+          visible: root.connNeedsAttention && !root.settingsOpen
+          width: parent.width
+          spacing: Style.space(2)
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: root.connAttentionText
+            color: root.bar ? root.bar.urgent : Color.urgent
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          Text {
+            text: "Connection settings"
+            color: Color.accent
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.openSettings()
+            }
+          }
+        }
+
+        // ---- Insecure remote HTTP badge (acknowledged state is
+        //      prominently marked; the acknowledgement flow itself
+        //      lives in settings — one canonical surface).
+        Text {
+          visible: root.connInfo && root.connInfo.insecure === true && root.connInfo.status === "connected" && !root.settingsOpen
+          width: parent.width
+          elide: Text.ElideRight
+          text: "insecure connection — traffic is not encrypted"
+          color: root.bar ? root.bar.urgent : Color.urgent
+          opacity: 0.85
+          font.pixelSize: Style.font.caption
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        }
+
         // ---- Filters.
         Row {
+          visible: !root.settingsOpen
           width: parent.width
           spacing: Style.space(3)
 
@@ -608,7 +897,7 @@ Panel {
         // ---- Add magnet (simple native input; presentation-safe
         //      validation only, the daemon is the authority).
         Row {
-          visible: root.addOpen
+          visible: root.addOpen && !root.settingsOpen
           width: parent.width
           spacing: Style.space(3)
 
@@ -648,6 +937,7 @@ Panel {
 
         // ---- Torrent list.
         ListView {
+          visible: !root.settingsOpen
           id: listView
           width: parent.width
           height: Math.min(contentHeight, Style.space(340))
@@ -793,7 +1083,7 @@ Panel {
         //      one is visually urgent and separately confirmed. The daemon
         //      requires the boolean — nothing is inferred (ADR-0006).
         Column {
-          visible: root.confirmHash !== ""
+          visible: root.confirmHash !== "" && !root.settingsOpen
           width: parent.width
           spacing: Style.space(2)
 
@@ -846,6 +1136,318 @@ Panel {
                   root.confirmHash = ""
                   root.confirmName = ""
                 }
+              }
+            }
+          }
+        }
+
+        // ---- Connection settings (Phase 0.5, ADR-0008 §10): one
+        //      canonical form as a mode of this panel. The password is
+        //      transient (echoMode masked, cleared after the frame is
+        //      written); the stored secret NEVER crosses back into
+        //      QML — "stored" renders from has_secret.
+        Column {
+          visible: root.settingsOpen
+          width: parent.width
+          spacing: Style.space(3)
+
+          Text {
+            text: "qBittorrent connection"
+            color: root.barForeground
+            opacity: 0.9
+            font.pixelSize: Style.font.body
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+
+          // Address
+          Text {
+            text: "Address"
+            color: root.barForeground
+            opacity: 0.55
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          TextField {
+            id: addrInput
+            width: parent.width
+            text: root.addrText
+            placeholderText: "https://qbittorrent.home.arpa"
+            color: root.barForeground
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            background: Rectangle {
+              radius: Style.space(2)
+              color: Color.muted
+              opacity: 0.18
+            }
+            onTextEdited: {
+              root.addrText = addrInput.text
+              root.testResult = null
+              root.connError = ""
+              if (root.allowInsecure) root.allowInsecure = false
+            }
+            onAccepted: root.runTest()
+          }
+
+          // Username
+          Text {
+            text: "Username"
+            color: root.barForeground
+            opacity: 0.55
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          TextField {
+            id: userInput
+            width: parent.width
+            text: root.userText
+            placeholderText: "admin"
+            color: root.barForeground
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            background: Rectangle {
+              radius: Style.space(2)
+              color: Color.muted
+              opacity: 0.18
+            }
+            onTextEdited: {
+              root.userText = userInput.text
+              root.testResult = null
+            }
+            onAccepted: root.runTest()
+          }
+
+          // Password (write-only: empty = keep/delete per intent)
+          Text {
+            text: "Password"
+            color: root.barForeground
+            opacity: 0.55
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          TextField {
+            id: passInput
+            width: parent.width
+            text: root.passText
+            placeholderText: root.connInfo && root.connInfo.has_secret === true ? "unchanged" : "none (localhost bypass)"
+            echoMode: TextInput.Password
+            color: root.barForeground
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            background: Rectangle {
+              radius: Style.space(2)
+              color: Color.muted
+              opacity: 0.18
+            }
+            onTextEdited: {
+              root.passText = passInput.text
+              if (root.passText !== "") root.forgetSecret = false
+            }
+            onAccepted: root.saveConnection()
+          }
+          Row {
+            width: parent.width
+            spacing: Style.space(4)
+            Text {
+              visible: root.connInfo && root.connInfo.has_secret === true && root.passText === ""
+              text: root.forgetSecret ? "stored password will be removed" : "stored securely"
+              color: root.forgetSecret ? (root.bar ? root.bar.urgent : Color.urgent) : root.barForeground
+              opacity: 0.55
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            Text {
+              visible: root.connInfo && root.connInfo.has_secret === true && root.passText === ""
+              text: root.forgetSecret ? "Keep" : "Forget"
+              color: Color.accent
+              opacity: 0.9
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.forgetSecret = !root.forgetSecret
+              }
+            }
+          }
+
+          // Security: verification is always on (no disable switch at
+          // any layer — ADR-0008 §4); the pin flow appears only when a
+          // test captured an untrusted certificate.
+          Text {
+            width: parent.width
+            text: "\u2713 Verify TLS certificate"
+            color: Color.accent
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          Column {
+            visible: root.pinCandidate !== ""
+            width: parent.width
+            spacing: Style.space(1)
+            Text {
+              width: parent.width
+              elide: Text.ElideMiddle
+              text: "offered certificate " + root.pinCandidate
+              color: root.barForeground
+              opacity: 0.55
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            Text {
+              text: root.pinTrusted ? "trusted (pinned)" : "Trust this certificate"
+              color: root.pinTrusted ? Color.accent : (root.bar ? root.bar.urgent : Color.urgent)
+              opacity: 0.9
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  // Trust = re-test with the pin; the daemon builds the
+                  // trust anchor from its OWN captured certificate.
+                  if (!root.pinTrusted) {
+                    root.pinTrusted = true
+                    root.runTest()
+                  }
+                }
+              }
+            }
+          }
+
+          // Insecure-HTTP acknowledgement (ASCII D): only after a test
+          // refused plain HTTP to a non-loopback host.
+          Column {
+            visible: root.testResult && root.testResult.status === "insecure_http"
+            width: parent.width
+            spacing: Style.space(2)
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "Credentials and session data would cross the network without transport encryption."
+              color: root.bar ? root.bar.urgent : Color.urgent
+              opacity: 0.9
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            Row {
+              spacing: Style.space(4)
+              Text {
+                text: "Use HTTPS instead"
+                color: Color.accent
+                opacity: 0.9
+                font.pixelSize: Style.font.caption
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    // Nudge the address to https and re-test.
+                    const a = root.addrText.trim()
+                    if (a.indexOf("http://") === 0) root.addrText = "https://" + a.slice(7)
+                    root.testResult = null
+                    root.runTest()
+                  }
+                }
+              }
+              Text {
+                text: "Continue knowingly"
+                color: root.bar ? root.bar.urgent : Color.urgent
+                opacity: 0.95
+                font.pixelSize: Style.font.caption
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.allowInsecure = true
+                    root.runTest()
+                  }
+                }
+              }
+            }
+          }
+
+          // Test result (ASCII F/G): differentiated, never collapsed
+          // into "connection failed".
+          Column {
+            visible: root.testResult !== null
+            width: parent.width
+            spacing: Style.space(1)
+
+            Text {
+              text: root.testResult && root.testResult.result === "ok" ? "\u2713 Connection successful" : "\u2715 " + root.testStatusText()
+              color: root.testResult && root.testResult.result === "ok" ? Color.accent : (root.bar ? root.bar.urgent : Color.urgent)
+              opacity: 0.95
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            Text {
+              visible: root.testResult && root.testResult.result === "ok"
+              width: parent.width
+              text: root.testResult ? ("qBittorrent " + (root.testResult.app_version || "?") +
+                      "   WebAPI " + (root.testResult.webapi_version || "?") +
+                      "   " + (root.testResult.transport || "?").toUpperCase() +
+                      (root.userText.trim() !== "" ? "   authenticated" : "   no authentication")) : ""
+              color: root.barForeground
+              opacity: 0.7
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+            Text {
+              visible: root.testResult && root.testResult.result !== "ok" && root.testResult.detail
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: root.testResult ? (root.testResult.detail || "") : ""
+              color: root.barForeground
+              opacity: 0.65
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+          }
+
+          // Configure rejection banner (fixed strings).
+          Text {
+            visible: root.connError !== ""
+            width: parent.width
+            elide: Text.ElideRight
+            text: root.connError
+            color: root.bar ? root.bar.urgent : Color.urgent
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+
+          // Actions
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+            Text {
+              text: root.connBusy ? "Testing\u2026" : "Test connection"
+              color: Color.accent
+              opacity: root.addrText.trim() !== "" && !root.connBusy ? 1.0 : 0.4
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (!root.connBusy) root.runTest()
+              }
+            }
+            Text {
+              text: "Save"
+              color: Color.accent
+              opacity: root.addrText.trim() !== "" && !root.connBusy ? 1.0 : 0.4
+              font.pixelSize: Style.font.body
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (!root.connBusy) root.saveConnection()
               }
             }
           }

@@ -10,12 +10,14 @@ package ipc
 type ConnectionStatusData struct {
 	Configured bool
 	Mode       string // local | remote
+	URL        string // validated origin (non-secret; settings prefill)
 	Host       string
 	Transport  string // http | https
 	Insecure   bool
 	Username   string
 	HasSecret  bool
 	TLSMode    string
+	Pin        string // active pinned fingerprint (iff pin mode; non-secret)
 	Status     string
 	Detail     string
 	Epoch      uint64
@@ -27,12 +29,14 @@ type connectionStatusResponse struct {
 	ID         int64  `json:"id"`
 	Configured bool   `json:"configured"`
 	Mode       string `json:"mode"`
+	URL        string `json:"url"`
 	Host       string `json:"host"`
 	Transport  string `json:"transport"`
 	Insecure   bool   `json:"insecure"`
 	Username   string `json:"username"`
 	HasSecret  bool   `json:"has_secret"`
 	TLSMode    string `json:"tls_mode"`
+	Pin        string `json:"pin,omitempty"`
 	Status     string `json:"status"`
 	Detail     string `json:"detail"`
 	Epoch      uint64 `json:"epoch"`
@@ -126,12 +130,14 @@ func EncodeConnectionStatus(id int64, d ConnectionStatusData) []byte {
 		Type: "connection.status", Protocol: ProtocolVersion, ID: id,
 		Configured: d.Configured,
 		Mode:       capString(d.Mode, 16),
+		URL:        capString(d.URL, 256),
 		Host:       capString(d.Host, 128),
 		Transport:  capString(d.Transport, 8),
 		Insecure:   d.Insecure,
 		Username:   capString(d.Username, 64),
 		HasSecret:  d.HasSecret,
 		TLSMode:    capString(d.TLSMode, 16),
+		Pin:        capString(d.Pin, 64),
 		Status:     capString(d.Status, 32),
 		Detail:     capString(d.Detail, 128),
 		Epoch:      d.Epoch,
