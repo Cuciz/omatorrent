@@ -43,10 +43,30 @@ Panel {
   property bool subscribed: false
   property bool applyingSnapshot: false
 
+  // ---- Mutations (v1.2, ADR-0006). Presentation-only intents; the
+  //      daemon validates, submits and confirms from committed state.
+  //      Pending overlays are cosmetic — committed state stays the only
+  //      authority and everything pending is dropped on disconnect.
+  property var pendingMutations: ({}) // hash -> {action, mutation?}
+  property string mutError: ""
+  property real mutErrorSince: 0
+  property bool addOpen: false
+  property string addText: ""
+  property string confirmHash: ""
+  property string confirmName: ""
+  property int mutSeq: 0 // ref uniqueness within this panel instance
+  property string pendingMutHash: "" // hash of the in-flight mutation request
+
   readonly property string xdgRuntime: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string socketPath: xdgRuntime !== "" ? xdgRuntime + "/omatorrent/service.sock" : ""
 
   readonly property var filters: ["all", "active", "downloading", "seeding", "paused", "completed"]
+
+  // Presentation-safe add validation only (daemon is authoritative).
+  readonly property bool addValid: {
+    const u = addText.trim()
+    return u.startsWith("magnet:") && u.length <= 2048
+  }
 
   function send(msg) {
     if (!sock.connected) return
@@ -78,6 +98,93 @@ Panel {
     send({ type: "torrent.subscribe", id: pendingId })
   }
 
+  // ---- Mutation client discipline (extends the one-in-flight rule to
+  //      "mutation"; ref is unique per ATTEMPT, never reused).
+  function newRef() {
+    mutSeq++
+    return "p" + Date.now() + "-" + mutSeq
+  }
+
+  function requestMutation(action, extra) {
+    if (pendingKind !== "" || !sock.connected || !helloSent) return false
+    pendingKind = "mutation"
+    pendingId = nextId++
+    pendingSince = Date.now()
+    pendingMutHash = extra && typeof extra.hash === "string" ? extra.hash : ""
+    const msg = Object.assign({ type: action, id: pendingId, ref: newRef() }, extra)
+    send(msg)
+    return true
+  }
+
+  function togglePause(hash) {
+    const t = torrents[hash]
+    if (!t) return
+    const action = t.state === "paused" ? "torrent.resume" : "torrent.pause"
+    if (!requestMutation(action, { hash: hash })) return
+    pendingMutations[hash] = { action: action }
+    pendingMutationsChanged()
+  }
+
+  function addMagnet() {
+    const url = addText.trim()
+    // Presentation-safe basics only; the daemon is the authority.
+    if (!url.startsWith("magnet:") || url.length > 2048) return
+    if (!requestMutation("torrent.add", { url: url })) return
+    addOpen = false
+    addText = ""
+    mutError = ""
+  }
+
+  function requestRemove(hash, deleteFiles) {
+    const t = torrents[hash]
+    if (!t) return
+    // delete_files is an explicit boolean at every layer (ADR-0006).
+    if (!requestMutation("torrent.remove", { hash: hash, delete_files: deleteFiles })) return
+    pendingMutations[hash] = { action: "torrent.remove" }
+    pendingMutationsChanged()
+    confirmHash = ""
+    confirmName = ""
+  }
+
+  function showMutationOutcome(action, hash, status, code) {
+    if (status === "confirmed") {
+      const p = pendingMutations[hash]
+      if (p && p.action === action) {
+        delete pendingMutations[hash]
+        pendingMutationsChanged()
+      }
+      mutError = ""
+      return
+    }
+    if (status === "timeout") {
+      // Ambiguous, not failed: committed state remains the authority.
+      const p2 = pendingMutations[hash]
+      if (p2 && p2.action === action) {
+        delete pendingMutations[hash]
+        pendingMutationsChanged()
+      }
+      mutError = "Action result unknown — state will tell"
+      mutErrorSince = Date.now()
+      return
+    }
+    // Stage-1 rejection codes (deterministic model, docs/IPC.md v1.2).
+    const messages = {
+      stale_torrent: "Torrent no longer exists",
+      invalid_url: "Invalid magnet link",
+      duplicate: "Torrent already added",
+      backend_rejected: "qBittorrent refused the action",
+      backend_unavailable: "qBittorrent unreachable",
+      busy: "Too many actions in flight",
+      ref_conflict: "Action conflict — try again"
+    }
+    mutError = messages[code] || "Action failed"
+    mutErrorSince = Date.now()
+    if (code === "stale_torrent") {
+      delete pendingMutations[hash]
+      pendingMutationsChanged()
+    }
+  }
+
   function resetSession() {
     helloSent = false
     subscribed = false
@@ -87,6 +194,12 @@ Panel {
     backendOk = false
     dlSpeed = 0
     upSpeed = 0
+    // Never carry optimistic state across a connection loss: the fresh
+    // snapshot after resubscribe is the truth (ADR-0006 client rules).
+    pendingMutations = ({})
+    pendingMutationsChanged()
+    confirmHash = ""
+    confirmName = ""
   }
 
   function formatSpeed(bps) {
@@ -277,6 +390,40 @@ Panel {
         applyingSnapshot = false
         rebuildView()
         break
+      case "mutation.accepted":
+        // Stage 1 (ADR-0006): submitted, NOT success. The overlay stays
+        // until the state-derived result arrives.
+        if (pendingKind !== "mutation" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        if (msg.action === "torrent.add" && typeof msg.hash === "string") {
+          pendingMutations[msg.hash] = { action: "torrent.add", mutation: msg.mutation }
+          pendingMutationsChanged()
+        } else if (pendingMutHash !== "" && pendingMutations[pendingMutHash] !== undefined &&
+                   pendingMutations[pendingMutHash].action === msg.action) {
+          pendingMutations[pendingMutHash].mutation = msg.mutation
+        }
+        pendingMutHash = ""
+        break
+      case "mutation.rejected":
+        if (pendingKind !== "mutation" || typeof msg.id !== "number" || msg.id !== pendingId) return
+        pendingId = -1
+        pendingKind = ""
+        showMutationOutcome("torrent.reject", pendingMutHash, "", msg.code)
+        pendingMutHash = ""
+        break
+      case "mutation.result":
+        if (typeof msg.id === "number") {
+          // Replay answer to a retried request: also the stage-1 response.
+          if (pendingKind !== "mutation" || msg.id !== pendingId) return
+          pendingId = -1
+          pendingKind = ""
+          pendingMutHash = ""
+        }
+        if (typeof msg.action === "string" && typeof msg.hash === "string") {
+          showMutationOutcome(msg.action, msg.hash, msg.status, "")
+        }
+        break
     }
   }
 
@@ -305,6 +452,9 @@ Panel {
     padding: Style.spacing.panelPadding
     contentWidth: Style.space(360)
     contentHeight: Style.space(440)
+      + (root.addOpen ? Style.space(12) : 0)
+      + (root.confirmHash !== "" ? Style.space(13) : 0)
+      + (root.mutError !== "" ? Style.space(6) : 0)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -337,7 +487,7 @@ Panel {
             font.pixelSize: Style.font.caption
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
           }
-          Item { width: parent.width - headerSpeeds.implicitWidth - Style.space(8); height: 1 }
+          Item { width: parent.width - headerSpeeds.implicitWidth - headerAdd.implicitWidth - Style.space(10); height: 1 }
           Text {
             id: headerSpeeds
             anchors.verticalCenter: parent.verticalCenter
@@ -346,6 +496,24 @@ Panel {
             opacity: 0.8
             font.pixelSize: Style.font.caption
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          // Add magnet entry point (daemon validates authoritatively).
+          Text {
+            id: headerAdd
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.addOpen ? "\u00D7" : "+"
+            color: root.addOpen ? Color.accent : root.barForeground
+            opacity: 0.8
+            font.pixelSize: Style.font.body
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                root.addOpen = !root.addOpen
+                if (!root.addOpen) root.addText = ""
+              }
+            }
           }
         }
 
@@ -374,6 +542,47 @@ Panel {
           }
         }
 
+        // ---- Add magnet (simple native input; presentation-safe
+        //      validation only, the daemon is the authority).
+        Row {
+          visible: root.addOpen
+          width: parent.width
+          spacing: Style.space(3)
+
+          TextField {
+            id: addInput
+            width: parent.width - addConfirm.implicitWidth - Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.addText
+            placeholderText: "magnet:?xt=urn:btih:\u2026"
+            color: root.barForeground
+            opacity: 0.9
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            background: Rectangle {
+              radius: Style.space(2)
+              color: Color.muted
+              opacity: 0.18
+            }
+            onTextEdited: root.addText = addInput.text
+            onAccepted: root.addMagnet()
+          }
+          Text {
+            id: addConfirm
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Add"
+            color: Color.accent
+            opacity: root.addValid ? 1.0 : 0.35
+            font.pixelSize: Style.font.caption
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.addMagnet()
+            }
+          }
+        }
+
         // ---- Torrent list.
         ListView {
           id: listView
@@ -392,6 +601,11 @@ Panel {
             width: ListView.view.width
             height: Style.space(13)
 
+            HoverHandler { id: rowHover }
+            readonly property bool mutPending: root.pendingMutations[hash] !== undefined
+            readonly property real rightWidth: Math.max(speedsText.visible ? speedsText.implicitWidth : 0,
+                                                        actionsRow.implicitWidth)
+
             Column {
               width: parent.width
               anchors.verticalCenter: parent.verticalCenter
@@ -405,23 +619,35 @@ Panel {
                   id: nameText
                   text: name
                   color: root.barForeground
-                  opacity: 0.9
+                  opacity: mutPending ? 0.55 : 0.9
                   font.pixelSize: Style.font.body
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   elide: Text.ElideRight
-                  width: parent.width - stateText.implicitWidth - speedsText.implicitWidth - Style.space(4)
+                  width: parent.width - stateText.implicitWidth - rightWidth - Style.space(4)
                 }
                 Text {
                   id: stateText
-                  text: state
-                  color: state === "downloading" ? Color.accent : root.barForeground
-                  opacity: 0.55
+                  text: {
+                    // Pending overlay: cosmetic only, cleared by the
+                    // daemon's state-derived result (never optimistic).
+                    const p = root.pendingMutations[hash]
+                    if (p) {
+                      if (p.action === "torrent.pause") return "pausing\u2026"
+                      if (p.action === "torrent.resume") return "resuming\u2026"
+                      if (p.action === "torrent.remove") return "removing\u2026"
+                      if (p.action === "torrent.add") return "adding\u2026"
+                    }
+                    return state
+                  }
+                  color: mutPending || state === "downloading" ? Color.accent : root.barForeground
+                  opacity: mutPending ? 0.9 : 0.55
                   font.pixelSize: Style.font.caption
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 }
-                Item { width: parent.width - nameText.width - stateText.implicitWidth - speedsText.implicitWidth - Style.space(4); height: 1 }
+                Item { width: parent.width - nameText.width - stateText.implicitWidth - rightWidth - Style.space(4); height: 1 }
                 Text {
                   id: speedsText
+                  visible: !actionsRow.visible
                   text: (dlspeed > 0 ? "\u2193 " + root.formatSpeed(dlspeed) + " " : "") +
                         (upspeed > 0 ? "\u2191 " + root.formatSpeed(upspeed) : "") +
                         (dlspeed === 0 && upspeed === 0 ? root.formatEta(eta) + "  " + ratio.toFixed(2) : "")
@@ -429,6 +655,36 @@ Panel {
                   opacity: 0.65
                   font.pixelSize: Style.font.caption
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                }
+                Row {
+                  id: actionsRow
+                  visible: rowHover.hovered && root.daemonUp && root.subscribed
+                  spacing: Style.space(3)
+                  Text {
+                    text: state === "paused" ? "\u25B6" : "\u2016"
+                    color: Color.accent
+                    font.pixelSize: Style.font.caption
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.togglePause(hash)
+                    }
+                  }
+                  Text {
+                    text: "\u2715"
+                    color: root.bar ? root.bar.urgent : Color.urgent
+                    font.pixelSize: Style.font.caption
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        root.confirmHash = hash
+                        root.confirmName = name
+                      }
+                    }
+                  }
                 }
               }
 
@@ -468,6 +724,80 @@ Panel {
             font.pixelSize: Style.font.caption
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
           }
+        }
+
+        // ---- Removal confirmation: two EXPLICIT paths; the delete-files
+        //      one is visually urgent and separately confirmed. The daemon
+        //      requires the boolean — nothing is inferred (ADR-0006).
+        Column {
+          visible: root.confirmHash !== ""
+          width: parent.width
+          spacing: Style.space(2)
+
+          Text {
+            width: parent.width
+            elide: Text.ElideRight
+            text: "Remove \u201C" + root.confirmName + "\u201D?"
+            color: root.barForeground
+            opacity: 0.9
+            font.pixelSize: Style.font.body
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          }
+          Row {
+            spacing: Style.space(4)
+
+            Text {
+              text: "Remove"
+              color: Color.accent
+              opacity: 0.9
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.requestRemove(root.confirmHash, false)
+              }
+            }
+            Text {
+              text: "Remove + delete files"
+              color: root.bar ? root.bar.urgent : Color.urgent
+              opacity: 0.95
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.requestRemove(root.confirmHash, true)
+              }
+            }
+            Text {
+              text: "Cancel"
+              color: root.barForeground
+              opacity: 0.55
+              font.pixelSize: Style.font.caption
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.confirmHash = ""
+                  root.confirmName = ""
+                }
+              }
+            }
+          }
+        }
+
+        // ---- Mutation outcome banner (truthful success/failure/ambiguous).
+        Text {
+          visible: root.mutError !== ""
+          width: parent.width
+          elide: Text.ElideRight
+          text: root.mutError
+          color: root.bar ? root.bar.urgent : Color.urgent
+          opacity: 0.9
+          font.pixelSize: Style.font.caption
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
         }
       }
     }
@@ -526,6 +856,14 @@ Panel {
         root.backoffMs = Math.min(root.backoffMs * 2, 10000)
       }
     }
+  }
+
+  // Mutation outcome banner expiry (truthful, transient).
+  Timer {
+    interval: 1000
+    running: root.mutError !== ""
+    repeat: true
+    onTriggered: if (Date.now() - root.mutErrorSince > 6000) root.mutError = ""
   }
 
   Component.onCompleted: if (root.socketPath !== "") sock.connected = true

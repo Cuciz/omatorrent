@@ -162,14 +162,27 @@ type refRecord struct {
 	mutation uint64
 }
 
+// matches reports whether a replayed request is the same attempt as the
+// recorded one. Add requests carry no hash on the wire — their identity
+// is the magnet URL (the daemon derives the hash from it).
 func (r *refRecord) matches(req Request) bool {
-	return r.action == req.Action && r.hash == req.Hash &&
-		r.url == req.URL && r.delFiles == req.DeleteFiles
+	if r.action != req.Action || r.delFiles != req.DeleteFiles {
+		return false
+	}
+	if r.action == Add {
+		return r.url == req.URL
+	}
+	return r.hash == req.Hash
 }
 
 func (p *pending) matches(req Request) bool {
-	return p.action == req.Action && p.hash == req.Hash &&
-		p.url == req.URL && p.delFiles == req.DeleteFiles
+	if p.action != req.Action || p.delFiles != req.DeleteFiles {
+		return false
+	}
+	if p.action == Add {
+		return p.url == req.URL
+	}
+	return p.hash == req.Hash
 }
 
 // New creates a Mutator. Call Run alongside the syncer.

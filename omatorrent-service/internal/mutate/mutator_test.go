@@ -588,3 +588,29 @@ func TestRingBounded(t *testing.T) {
 		t.Fatalf("ring size = %d, want 4", n)
 	}
 }
+
+// Regression (caught live by the Phase 0.3 smoke): an add replay must
+// match on the magnet URL — add requests carry no hash on the wire, so
+// hash comparison wrongly returned ref_conflict.
+func TestReplayAddMatchesOnURL(t *testing.T) {
+	b := &fakeBackend{echo: h1}
+	s := newFakeState(nil)
+	m, _ := newTestMutator(b, s)
+	defer s.set(map[string]state.Torrent{})
+
+	url := "magnet:?xt=urn:btih:" + h1 + "&dn=otqs-disposable-smoke"
+	if s1 := m.Submit(Request{Action: Add, URL: url, Ref: "smoke-1"}); s1.Outcome != OutcomeAccepted {
+		t.Fatalf("stage1 = %+v", s1)
+	}
+	s.set(map[string]state.Torrent{h1: torrent(h1, state.StateDownloading)})
+	waitResult(t, m)
+
+	// Replay the completed add ref: recorded result, no second backend add.
+	s1 := m.Submit(Request{Action: Add, URL: url, Ref: "smoke-1"})
+	if s1.Replay == nil || s1.Replay.Status != StatusConfirmed {
+		t.Fatalf("replay = %+v, want recorded confirmed result", s1)
+	}
+	if got := b.recorded(); len(got) != 1 {
+		t.Fatalf("backend calls = %v", got)
+	}
+}
