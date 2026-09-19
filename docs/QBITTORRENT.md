@@ -243,12 +243,144 @@ probes, cookie-jar session) and cross-checked with the official wiki.
   its rid survived.
 - Non-goal confirmed: `sync/torrentPeers` not needed for 0.2.
 
+## WebUI auth, sessions, TLS, remote deployment (Phase 0.5 research, 2026-09-19)
+
+Researched for remote-backend support; source-verified against qBittorrent
+tags `v5_2_x`/`v5_1_x`/`v5_0_x`/`v4_6_x` (webapplication.cpp,
+api/authcontroller.cpp, base/preferences.cpp, base/http/server.cpp,
+api/synccontroller.cpp) plus the official wiki, with safe live probes on
+the installed 5.2.3 (NO login POSTs against the real instance — its
+5-attempt/1 h IP ban makes wrong-credential experiments destructive).
+
+### Login contract (VERSION DEPENDENT — adapter must accept both)
+
+- FACT: **5.2 series**: `POST auth/login` success → **HTTP 204, empty
+  body** + `Set-Cookie`; wrong credentials → **HTTP 401** `Unauthorized`;
+  banned IP → **HTTP 403** with the ban message "Your IP address has been
+  banned after too many failed authentication attempts.".
+  SOURCE: `authcontroller.cpp::loginAction` + `doProcessRequest` (null
+  result → 204) at `v5_2_x`.
+- FACT: **4.6–5.1**: success → `200 "Ok."`; wrong credentials → `200
+  "Fails."`; banned → 403 + same message.
+  SOURCE: identical code at `v4_6_x`/`v5_0_x`/`v5_1_x`.
+  IMPLICATION: the adapter treats {204, 200+"Ok."} as success and
+  {401, 200+"Fails."} as bad credentials. On ≤ 5.1 a plain 401 on login
+  means CSRF/Host validation failure rather than bad credentials; the
+  daemon reports the honest combined class (`auth_failed` with a detail
+  mentioning both causes) since the wire cannot distinguish them.
+- FACT: session cookie name is **`QBT_SID_<WebUI-port>` on 5.2** and
+  **`SID` on ≤ 5.1**; flags HttpOnly, path=/, SameSite=Lax (5.2, CSRF on);
+  `Secure` only on trustworthy HTTPS origins. The cookie carries an
+  `expires` (sliding, default 1 h) and is re-issued when half-expired.
+  The client must NEVER hardcode the name (jar-based).
+  SOURCE: `WebApplication::setSessionCookie`, `SESSION_COOKIE_NAME_PREFIX`.
+- FACT: **403 `Forbidden` on a regular API call** = missing/expired
+  session (or banned IP); **401** = CSRF Origin/Referer mismatch or Host
+  validation failure (pre-auth, applies to every method incl. GET and
+  incl. `auth/login`, which is only "public" in the session sense).
+  SOURCE: `processRequest` order + `sessionInitialize`;
+  the 401-on-cross-origin-GET half CONFIRMED LIVE.
+- FACT: requests carrying **neither `Origin` nor `Referer` are explicitly
+  allowed** on 4.6→5.2 (source comment: blocking would "lead Web API
+  users to spoof headers"). OmaTorrent sends neither.
+  SOURCE: `isCrossSiteRequest`, verified identical v4_6_x→v5_2_x + LIVE.
+- FACT: Host header validation (default ON) compares Host (incl. port)
+  against the listen port + `WebUI\ServerDomains` (default `*`); the fix
+  behind proxies is the official `proxy_set_header Host $proxy_host`
+  recipe or a ServerDomains entry. `X-Forwarded-For` is honored only
+  with `ReverseProxySupportEnabled` + trusted proxy list; ban counters
+  then key on the forwarded client IP.
+  SOURCE: `validateHostHeader`, `resolveClientAddress`, wiki NGINX page.
+
+### Bans, whitelist, localhost bypass
+
+- FACT: defaults are **5 failed logins → 1 h ban** per resolved client IP
+  (`WebUI\MaxAuthenticationFailCount`/`BanDuration`, in-memory only,
+  cleared on success/restart; **0 disables banning** — the wiki's
+  recommendation behind shared proxies).
+  SOURCE: `preferences.cpp`, `webapplication.cpp` `m_clientFailedLogins`.
+  IMPLICATION: OmaTorrent's syncer goes sticky `auth_failed` after 3
+  consecutive bad-credential logins (ADR-0008 §6) — polling can never
+  reach the ban threshold by itself.
+- FACT: `WebUI\LocalHostAuth` **defaults to true (auth required even
+  from localhost)** on 4.6–5.2; this workstation's bypass
+  (`LocalHostAuth=false`) is a deliberate user setting. `AuthSubnetWhitelist`
+  (default off/empty) matches the resolved client address.
+  Bypassed clients still receive a session cookie (session created per
+  cookie-less request — keep the jar).
+  SOURCE: `isAuthNeeded`, `sessionInitialize`; LIVE cookie observation.
+
+### Sessions, logout, rid invalidation
+
+- FACT: `WebUI\SessionTimeout` default **3600 s sliding; 0 = never**.
+  `POST auth/logout` deletes the session and expires the cookie (200
+  empty ≤ 5.1; 204 on 5.2). SyncController is **per WebSession**:
+  logout/re-login destroys all sync state — a new session answers any
+  old rid with `full_update:true` and restarts rid at 1; incremental
+  deltas happen only when the submitted rid equals the immediately
+  previous response rid. rid cycles 1..1,000,000.
+  SOURCE: `WebSession::hasExpired`, `AuthController::logoutAction`,
+  `sessionStartImpl`, `maindataAction`.
+
+### HTTPS behavior
+
+- FACT: one port, one protocol: with `WebUI\HTTPS\Enabled` the single
+  listener wraps ALL connections in TLS (no simultaneous HTTP, no
+  separate HTTPS port, **no built-in HTTP→HTTPS redirect** — plain HTTP
+  to a TLS port just fails the handshake). Cert/key load failure falls
+  back to plaintext on the same port.
+  SOURCE: `base/http/server.cpp::incomingConnection`, `webui.cpp`.
+  IMPLICATION: scheme mistakes surface as opaque handshake errors; the
+  adapter classifies them with a protocol-mismatch hint (heuristic,
+  marked as such).
+
+### Reverse proxy / sub-path
+
+- FACT: qBittorrent has **no base-path option** — API routing is
+  anchored at root. Sub-path deployments are done by **prefix stripping
+  at the proxy** (official NGINX/IIS ARR/Traefik/Caddy recipes; e.g.
+  public `/qbt` → `proxy_pass http://127.0.0.1:30000/`). OmaTorrent
+  therefore accepts base URLs with a path component and requests
+  `{base}/api/v2/...`; cookie `path=/` works under a public prefix.
+  SOURCE: wiki reverse-proxy pages + `m_apiPathPattern`.
+
+### Version compatibility (endpoints OmaTorrent uses, 2026-09)
+
+- Maintained series: **5.2.x is the only line receiving releases**
+  (5.2.3 2026-07-07; 5.3.0beta1 2026-09-05; 5.1.4/5.0.5/4.6.7 are last
+  of their lines).
+- `app/version`/`app/webapiVersion`/`sync/maindata`+rid/`auth/login`/
+  `auth/logout`/`torrents/delete`: since WebAPI 2.0 (qbt 4.1), stable
+  semantics; `deleteFiles` is a REQUIRED parameter in 4.6+ source
+  (wiki "optional" tables are stale — we always send it explicitly).
+- `torrents/add`: **5.2 answers JSON** `{success_count, failure_count,
+  pending_count, added_torrent_ids}` with **202 when pending_count>0**
+  and 409 when nothing was added; ≤ 5.1 answers `200 "Ok."/"Fails."`.
+  The `paused` param became `stopped` in 5.0 (unused by OmaTorrent).
+- `torrents/stop`/`start`: since 5.0 (WebAPI 2.11.x); `pause`/`resume`
+  removed in 5.0 (live journal proof on this box). Existing
+  version-gated fallback (empty version → modern; unparseable → legacy)
+  is unchanged.
+- Future option (recorded, not 0.5): **API-key auth** (`Authorization:
+  Bearer qbt_...`) on ≥ 5.2.0 — stateless, ban-immune; a profile option
+  if 4.x support ever drops.
+
+### Official security recommendations
+
+- No dedicated "WebUI security" wiki page exists; the official remote
+  model is TLS terminated by a reverse proxy passing Host/X-Forwarded-*
+  (with the shared-proxy ban caveat above) or built-in HTTPS with a
+  real or self-signed certificate.
+
 ## Adapter rules derived from this matrix
 
-1. Auth: `POST auth/login` (Referer/Origin matching Host), SID cookie reuse;
-   treat 403-after-failures as BAN (distinct from bad credentials). Localhost
-   deployments may omit credentials entirely (bypass) — the adapter must
-   work in both modes without logging secrets.
+1. Auth: `POST auth/login` with version-adaptive result handling
+   (204/200-"Ok." success; 401/200-"Fails." bad credentials; 403 ban),
+   cookie jar (name never assumed); treat 403-after-failures as BAN
+   (distinct from bad credentials). Send NEITHER Origin NOR Referer
+   (explicitly permitted 4.6→5.2). Localhost deployments may omit
+   credentials entirely (bypass) — the adapter must work in both modes
+   without logging secrets.
 2. Always probe `app/webapiVersion` at connect; compare against the
    capability matrix before using any endpoint above the 2.0 baseline.
 3. State sync: rid-based `sync/maindata` deltas with a persistent cookie
