@@ -1,8 +1,9 @@
 # OmaTorrent — IPC Contract v1
 
 Status: v1 (ADR-0004) + v1.1 extension (ADR-0005, read-only torrent
-state). No mutations, no secrets. Encoding: newline-delimited JSON
-(NDJSON) — see ADR-0004 for the choice vs JSON-RPC/binary framing.
+state) + v1.2 extension (ADR-0006, staged mutations). No secrets.
+Encoding: newline-delimited JSON (NDJSON) — see ADR-0004 for the choice
+vs JSON-RPC/binary framing.
 
 ## Transport and framing
 
@@ -174,6 +175,92 @@ contain gaps; it identifies ordering, not per-subscription counting.
   emitted mid-merge; a backend anomaly discards the partial cycle
   (last-known-good) so clients never see corrupt state.
 
+## v1.2 extension: staged torrent mutations (ADR-0006)
+
+The protocol's only backend-mutating surface. Core principle:
+**request accepted ≠ mutation confirmed.** Acceptance means the daemon
+validated the request against its committed state and the backend
+acknowledged the submission; confirmation arrives as a separate,
+state-derived result. Clients must never present optimistic state as
+success. All qBittorrent vocabulary (stop/start vs pause/resume,
+deleteFiles, 409 semantics) stays daemon-side; QML expresses intent only.
+
+### Requests (after hello; exact key sets)
+
+```json
+{"type":"torrent.pause","id":4,"hash":"…40 or 64 hex…","ref":"r-…"}
+{"type":"torrent.resume","id":5,"hash":"…","ref":"r-…"}
+{"type":"torrent.add","id":6,"url":"magnet:?xt=urn:btih:…","ref":"r-…"}
+{"type":"torrent.remove","id":7,"hash":"…","delete_files":false,"ref":"r-…"}
+```
+
+- `ref` — client-generated idempotency key, 1–128 chars of
+  `[A-Za-z0-9._:-]`, unique per mutation ATTEMPT. Enables daemon-side
+  replay handling (below). Never echoed in responses.
+- `hash` — 40/64 hex at parse time; anything else is `invalid_message`.
+- `delete_files` — REQUIRED JSON boolean, no default, on
+  `torrent.remove` only. Missing/non-boolean ⇒ `invalid_message`
+  (connection closes): destructive ambiguity is a protocol violation.
+  The daemon forwards the intent explicitly to qBittorrent and never
+  infers or upgrades delete-files intent.
+- `url` — string ≤ 2048 bytes starting with `magnet:`; structural magnet
+  validation happens daemon-side and rejects with `invalid_url` (a
+  pasted non-magnet is a user mistake, not a protocol violation).
+- One mutation in flight per connection by construction (handlers run
+  in the connection's lockstep loop, bounded 5 s); a daemon-wide cap of
+  4 concurrent submissions rejects excess with `busy`.
+
+### Stage 1 — request response
+
+Accepted (mutation is a daemon-global monotonic id; action echoes the
+request type; hash is the target — for add, the daemon-parsed infohash
+cross-checked against the backend echo on ≥ 5.2.0 backends):
+```json
+{"type":"mutation.accepted","protocol":1,"id":4,"mutation":12,"action":"torrent.pause","hash":"…"}
+```
+Rejected (no mutation performed or backend refused; connection stays
+open; no payload echoed):
+```json
+{"type":"mutation.rejected","protocol":1,"id":4,"code":"stale_torrent"}
+```
+
+| Code | Condition |
+|---|---|
+| stale_torrent | hash not in the daemon's committed state (ghost row / already removed / wrong identity) |
+| invalid_url | magnet failed daemon-side structural validation (scheme, `xt` urn, hex btih) |
+| duplicate | add: hash already present in committed state |
+| backend_rejected | backend refused (e.g. add 409 not explained by state, other non-2xx) |
+| backend_unavailable | backend down (sync degraded) or submission transport failure |
+| busy | daemon-wide in-flight cap exceeded |
+| ref_conflict | ref replayed with different action/parameters than recorded |
+
+### Stage 2 — terminal result (push, ≤ 10 s reconcile window)
+
+```json
+{"type":"mutation.result","protocol":1,"mutation":12,"action":"torrent.pause","hash":"…","status":"confirmed"}
+```
+`confirmed` = committed sync state observed the intent (pause ⇒ state
+`paused`; resume ⇒ present and not `paused`; add ⇒ present; remove ⇒
+absent). `timeout` = window elapsed without confirmation: the outcome is
+AMBIGUOUS and surfaced as such; committed state remains the only
+authority. Results are delivered exactly once per mutation, on every
+connection that has issued at least one mutation request (pure status
+clients such as the bar widget never receive them).
+
+### Replay and retry rules
+
+- In-flight `ref` replay ⇒ `mutation.accepted` with the SAME mutation id
+  (no second backend call).
+- Completed `ref` replay ⇒ one terminal frame with the recorded outcome
+  (rejected code or result status). No second backend call — a same-hash
+  remove can never execute twice through a retry.
+- Deduplication is per-daemon-process (NOT durable across daemon
+  restarts): clients must never auto-replay destructive refs across a
+  daemon restart; a fresh user action is required. pause/resume are
+  naturally idempotent and MAY be re-issued with a new ref; add is
+  duplicate-protected on modern backends; remove is NEVER retried
+  blindly — re-derive from state, then require fresh confirmation.
+
 ## Errors and resource limits
 
 Response shape (then connection closes):
@@ -187,7 +274,7 @@ Response shape (then connection closes):
 | message_too_large | Frame cannot fit in 4096 bytes including LF |
 | handshake_required | A valid message other than hello arrives first |
 | version_mismatch | First hello has an integer protocol other than 1 |
-| unsupported_message | After hello, a valid message type other than health/system.status/torrent.subscribe, including another hello; also a second torrent.subscribe on an already-subscribed connection (error only, connection stays open) |
+| unsupported_message | After hello, a valid message type other than health/system.status/torrent.subscribe/torrent.pause/torrent.resume/torrent.add/torrent.remove, including another hello; also a second torrent.subscribe on an already-subscribed connection (error only, connection stays open) |
 
 Unknown message types use the type-only shape; adding other fields is
 invalid_message. A hello never carries an id; health/system.status always
@@ -200,10 +287,13 @@ response.
 At most 16 active clients; excess connections close without a response.
 Handshake deadline: 5 seconds. Following frames: 30-second idle read
 deadline; responses have a 5-second write deadline. Responses are always
-produced from cached state, so they arrive promptly; the degraded
-`qbittorrent:"unavailable"` shape is the answer whenever the cache holds
-no live backend state (startup window or backend down). Every client is
-closed on shutdown, including clients stalled halfway through a frame.
+produced from cached state, so they arrive promptly — the one exception
+is the v1.2 mutation stage-1 response, which performs one bounded
+(≤ 5 s) backend submission inline under the lockstep discipline; the
+degraded `qbittorrent:"unavailable"` shape is the answer whenever the
+cache holds no live backend state (startup window or backend down).
+Every client is closed on shutdown, including clients stalled halfway
+through a frame.
 
 ## Client obligations (Phase 0 QML client)
 
@@ -214,6 +304,11 @@ closed on shutdown, including clients stalled halfway through a frame.
 - On disconnect or error response: drop state including the pending id,
   render the offline state, reconnect with bounded backoff, and handshake
   again before further requests.
+- Mutations (v1.2): generate a fresh `ref` per attempt; treat
+  `mutation.accepted` as "submitted", never as success; clear all
+  pending overlays on disconnect and re-derive from the fresh snapshot;
+  never auto-retry `torrent.remove` (fresh user confirmation required);
+  render `timeout` results as ambiguous, not failed.
 - Never send qBittorrent data, credentials, or derived secrets; this
   protocol carries none.
 
