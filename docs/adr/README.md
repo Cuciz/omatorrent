@@ -13,6 +13,7 @@ decision; implementation must conform until an ADR explicitly supersedes it.
 | [0004](0004-phase0-ipc-v1.md) | IPC v1: NDJSON frames, strict schema, Unix-socket lifecycle | ACCEPTED |
 | [0005](0005-ipc-v1-1-torrent-state.md) | IPC v1.1: read-only torrent state delivery via subscription | ACCEPTED |
 | [0006](0006-ipc-v1-2-mutations.md) | IPC v1.2: staged torrent mutation contract (accepted/result, ref replay, explicit delete_files) | ACCEPTED |
+| [0007](0007-ipc-v1-3-dashboard-aggregates.md) | IPC v1.3: daemon-side dashboard aggregates (current-state poll surface) | ACCEPTED |
 
 ## Format
 
