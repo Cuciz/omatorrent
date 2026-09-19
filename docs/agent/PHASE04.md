@@ -1,8 +1,25 @@
 # Phase 0.4 — Native dashboard (record)
 
 Tracking: GitHub issue #7; branch `feat/phase04-dashboard`.
-Status: IMPLEMENTED, PR open for external review (NOT merged). Date: 2026-09-19.
+Status: MERGED. Date: 2026-09-19.
 Base: main @ c487e2d (Phase 0.3 merged at fc8615f).
+
+## Final merge record (2026-09-19)
+
+- PR #8 **MERGED** into `main` via merge commit
+  `df373af6a2358d90f56fe419c687c903ca59ac22`
+  (normal merge method, matching the PR #2/#4/#6 convention; no
+  squash/rebase/force-push).
+- Final approved head: `651855067daaca8dcc143f86918ab2c254a24c5a`
+  (8 commits; pre-merge verification: OPEN, base `main` @ `c487e2d`,
+  MERGEABLE/CLEAN, 0 review threads, no new commits, no failing checks,
+  head SHA identical to the externally approved head — integrity
+  cleanup `6518550` included).
+- External final review verdict on head `6518550`: APPROVE FOR MERGE,
+  BLOCKERS: NONE.
+- Issue #7 CLOSED (COMPLETED) by the merge.
+- Local `main` fast-forwarded to `df373af`, tree clean; merged local
+  branch deleted.
 
 ## Delivered
 

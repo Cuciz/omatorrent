@@ -19,7 +19,7 @@ Dependencies and exit criteria use the evidence rules from
 | 0.9 | CI, update/rollback, hardening | all | CI green on tagged runs; upgrade + rollback tested; release gates pass |
 | 1.0 | Release | 0.9 | full release gate run (omatorrent-release skill) READY verdict |
 
-## Phase 0.4 — Dashboard (CURRENT, 2026-09-19)
+## Phase 0.4 — Dashboard (MERGED 2026-09-19 via PR #8 @ df373af)
 
 Large-format native Omarchy dashboard from current, truthful daemon
 state only (no history/metrics persistence — that is 0.8). Depends on

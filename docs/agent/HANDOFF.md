@@ -5,8 +5,9 @@ current state. Keep under ~60 lines. Do not paste conversations.
 
 ## CURRENT OBJECTIVE
 
-Phase 0.4 (dashboard, issue #7) implemented on
-`feat/phase04-dashboard`; PR open for external review, NOT merged.
+Phase 0.4 MERGED (PR #8 @ merge `df373af`, head `6518550`, issue #7
+closed; final record docs/agent/PHASE04.md incl. merge SHA). Next:
+Phase 0.5 planning per docs/ROADMAP.md.
 
 ## COMPLETED
 
@@ -33,7 +34,7 @@ Phase 0.4 (dashboard, issue #7) implemented on
 
 ## BLOCKERS
 
-- None known. Phase 0.4 PR awaits external review; do NOT auto-merge.
+- None known. Phase 0.4 merged; Phase 0.5 not started.
 
 ## TESTS ACTUALLY RUN (Phase 0.3, 2026-09-19)
 
