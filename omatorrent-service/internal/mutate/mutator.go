@@ -227,6 +227,9 @@ func (m *Mutator) SwitchBackend(b Backend) error {
 	return nil
 }
 
+// ReconcileForTest drives one reconcile pass synchronously.
+func (m *Mutator) ReconcileForTest() { m.reconcile() }
+
 // InFlight reports the number of in-flight mutations.
 func (m *Mutator) InFlight() int {
 	m.mu.Lock()

@@ -243,6 +243,11 @@ func (s *Syncer) SwitchBackend(b Backend) {
 	}
 }
 
+// CycleForTest drives one cycle synchronously (deterministic tests).
+func (s *Syncer) CycleForTest() bool {
+	return s.cycle(context.Background(), s.opts.FetchBg)
+}
+
 // Epoch returns the current backend epoch.
 func (s *Syncer) Epoch() uint64 {
 	s.mu.RLock()

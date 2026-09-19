@@ -15,9 +15,16 @@ func writeProfile(t *testing.T, path, body string, mode os.FileMode) {
 	}
 }
 
+// profilePath places the profile in its own directory, mirroring the
+// real ~/.config/omatorrent/connection.json layout (SaveStore enforces
+// 0700 on the profile's own directory).
+func profilePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "omatorrent", "connection.json")
+}
+
 func TestStoreRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "connection.json")
+	path := profilePath(t)
 	p := Profile{URL: "https://qbittorrent.home.arpa", Username: "clement",
 		TLSMode: TLSSystem, AllowInsecureHTTP: false}
 	if err := SaveStore(path, p); err != nil {
@@ -38,7 +45,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("mode = %04o", info.Mode().Perm())
 	}
 	// No temp file residue.
-	entries, _ := os.ReadDir(dir)
+	entries, _ := os.ReadDir(filepath.Dir(path))
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".connection") {
 			t.Fatalf("temp file residue: %s", e.Name())
@@ -74,11 +81,11 @@ func TestStoreRejectsSymlink(t *testing.T) {
 
 func TestStoreRejectsMalformed(t *testing.T) {
 	for name, body := range map[string]string{
-		"not json":        `{"url":`,
-		"unknown field":   `{"url":"http://127.0.0.1:8080","tls_mode":"system","evil":1}`,
-		"invalid url":     `{"url":"ftp://x","tls_mode":"system"}`,
-		"bad tls mode":    `{"url":"http://127.0.0.1:8080","tls_mode":"nope"}`,
-		"trailing":        `{"url":"http://127.0.0.1:8080"} {}`,
+		"not json":      `{"url":`,
+		"unknown field": `{"url":"http://127.0.0.1:8080","tls_mode":"system","evil":1}`,
+		"invalid url":   `{"url":"ftp://x","tls_mode":"system"}`,
+		"bad tls mode":  `{"url":"http://127.0.0.1:8080","tls_mode":"nope"}`,
+		"trailing":      `{"url":"http://127.0.0.1:8080"} {}`,
 	} {
 		path := filepath.Join(t.TempDir(), "connection.json")
 		writeProfile(t, path, body, 0o600)
@@ -102,7 +109,7 @@ func TestStoreRejectsOversized(t *testing.T) {
 }
 
 func TestSaveStoreRefusesInvalid(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "omatorrent", "connection.json")
+	path := profilePath(t)
 	if err := SaveStore(path, Profile{URL: "ftp://x", TLSMode: TLSSystem}); err == nil {
 		t.Fatal("invalid profile saved")
 	}
@@ -146,6 +153,7 @@ func TestSaveStoreDirectoryDiscipline(t *testing.T) {
 // does not follow) — the daemon never writes through a symlink.
 func TestSaveStoreReplacesSymlinkTarget(t *testing.T) {
 	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
 	os.MkdirAll(filepath.Join(dir, "victim"), 0o700)
 	victim := filepath.Join(dir, "victim", "connection.json")
 	writeProfile(t, victim, "sentinel", 0o600)
@@ -202,6 +210,7 @@ func TestLoadActive(t *testing.T) {
 // (e.g. from a crash) must not be clobbered blindly.
 func TestSaveStoreTempCollision(t *testing.T) {
 	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
 	tmp := filepath.Join(dir, ".connection.json.tmp")
 	writeProfile(t, tmp, "leftover", 0o600)
 	path := filepath.Join(dir, "connection.json")

@@ -581,6 +581,12 @@ func (c *Client) doFetch(ctx context.Context, path string) ([]byte, error) {
 // (an https:// endpoint reached via http:// or vice versa — Go's two
 // stable messages), then plain unreachable/timeout.
 func (c *Client) transportErr(err error) error {
+	// Pin-hook failures are OUR TLSError (Go wraps only standard
+	// verification in tls.CertificateVerificationError); catch both.
+	var own *TLSError
+	if errors.As(err, &own) {
+		return own
+	}
 	if t := classifyTLS(err); t != nil {
 		return t
 	}

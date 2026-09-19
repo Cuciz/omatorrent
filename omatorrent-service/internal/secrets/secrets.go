@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -88,7 +89,10 @@ func (s *SecretTool) run(ctx context.Context, args []string, stdin []byte) (stdo
 	cmd.Stderr = nil
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: secret-tool %s: %v", ErrUnavailable, args[0], classifyExec(err))
+		// Keep the classified error chainable (ErrUnavailable) while
+		// preserving the ExitError so Get can recognize the documented
+		// exit-1 "no match" case.
+		return out.Bytes(), fmt.Errorf("%w: secret-tool %s: %w", ErrUnavailable, args[0], err)
 	}
 	return out.Bytes(), nil
 }
@@ -113,23 +117,26 @@ func (s *SecretTool) Store(ctx context.Context, secret []byte) error {
 	return err
 }
 
+// Get returns the stored secret. secret-tool's documented "no match"
+// answer is exit 1 with empty output (research 2026-09-19) — that is
+// ok=false with a nil error; any other failure is an unusable store.
 func (s *SecretTool) Get(ctx context.Context) ([]byte, bool, error) {
-	out, err := s.run(ctx, append([]string{"lookup"}, attrArgs()...), nil)
-	if err != nil {
-		return nil, false, err
+	stdout, err := s.run(ctx, append([]string{"lookup"}, attrArgs()...), nil)
+	if err == nil {
+		out := stdout
+		if len(out) > 0 && out[len(out)-1] == '\n' {
+			out = out[:len(out)-1] // strip at most ONE trailing newline
+		}
+		if len(out) == 0 {
+			return nil, false, nil
+		}
+		return out, true, nil
 	}
-	if len(out) == 0 {
-		return nil, false, nil
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 && len(stdout) == 0 {
+		return nil, false, nil // not stored
 	}
-	// secret-tool prints the secret to stdout; strip at most ONE
-	// trailing newline so a password that itself ends in \n survives.
-	if n := len(out); out[n-1] == '\n' {
-		out = out[:n-1]
-	}
-	if len(out) == 0 {
-		return nil, false, nil
-	}
-	return out, true, nil
+	return nil, false, err
 }
 
 func (s *SecretTool) Delete(ctx context.Context) error {
@@ -144,18 +151,12 @@ func attrArgs() []string {
 	return []string{"service", AttrService, "kind", AttrKind}
 }
 
-// classifyExec maps subprocess failures to a short, secret-free
-// summary (exit code class only).
-func classifyExec(err error) string {
-	if ee, ok := err.(*exec.ExitError); ok {
-		return fmt.Sprintf("exit %d", ee.ExitCode())
-	}
-	return "spawn failed"
-}
-
 // Fake is an in-memory Provider for unit tests. It can be told to
-// simulate an unusable store (ErrUnavailable on every operation).
+// simulate an unusable store (ErrUnavailable on every operation). It is
+// safe for concurrent use (tests flip Secret/Unavailable while the
+// Manager's background presence probe runs).
 type Fake struct {
+	mu          sync.Mutex
 	Secret      []byte
 	Unavailable bool
 	StoreCalls  int
@@ -164,6 +165,8 @@ type Fake struct {
 }
 
 func (f *Fake) Store(ctx context.Context, secret []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.StoreCalls++
 	if f.Unavailable {
 		return ErrUnavailable
@@ -175,6 +178,8 @@ func (f *Fake) Store(ctx context.Context, secret []byte) error {
 }
 
 func (f *Fake) Get(ctx context.Context) ([]byte, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.GetCalls++
 	if f.Unavailable {
 		return nil, false, ErrUnavailable
@@ -188,12 +193,43 @@ func (f *Fake) Get(ctx context.Context) ([]byte, bool, error) {
 }
 
 func (f *Fake) Delete(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.DelCalls++
 	if f.Unavailable {
 		return ErrUnavailable
 	}
 	f.Secret = nil
 	return nil
+}
+
+// SecretValue snapshots the stored secret (test assertions).
+func (f *Fake) SecretValue() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Secret == nil {
+		return nil
+	}
+	return append([]byte(nil), f.Secret...)
+}
+
+// SetSecret replaces the stored secret atomically (tests: flipping the
+// field directly would race the Manager's background presence probe).
+func (f *Fake) SetSecret(secret []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if secret == nil {
+		f.Secret = nil
+		return
+	}
+	f.Secret = append([]byte(nil), secret...)
+}
+
+// SetUnavailable toggles the unusable-store simulation atomically.
+func (f *Fake) SetUnavailable(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Unavailable = v
 }
 
 // Wipe zeroes a secret buffer (best-effort hygiene; strings cannot be

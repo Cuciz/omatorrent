@@ -159,7 +159,10 @@ func normalizePath(p string) string {
 	if len(p) > MaxPathLen {
 		return ""
 	}
-	segments := strings.Split(strings.Trim(p, "/"), "/")
+	if strings.Contains(p[1:], "//") {
+		return "" // empty segments are ambiguous, not normalized
+	}
+	segments := strings.Split(strings.TrimSuffix(p, "/"), "/")[1:]
 	for _, s := range segments {
 		if s == "" || s == "." || s == ".." {
 			return ""
