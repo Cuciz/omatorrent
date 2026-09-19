@@ -96,3 +96,32 @@ func BenchmarkStateRead(b *testing.B) {
 		})
 	}
 }
+
+// benchmarkState builds a committed state with n torrents (all
+// transferring, worst case for the active-list sort).
+func benchmarkState(n int) State {
+	torrents := make(map[string]Torrent, n)
+	for i := 0; i < n; i++ {
+		torrents[mkHash(i)] = Torrent{
+			Hash: mkHash(i), Name: fmt.Sprintf("Bench torrent %d", i),
+			State: StateDownloading, Progress: 0.42,
+			DlSpeed: int64(100000 + i), UpSpeed: int64(5000 + i),
+			Size: 1073741824, Completed: 450971566,
+		}
+	}
+	return State{BackendOK: true, Torrents: torrents}
+}
+
+// BenchmarkDashboardAggregate measures the v1.3 aggregate computation
+// (per dashboard.status poll; worst case: every torrent transferring).
+func BenchmarkDashboardAggregate(b *testing.B) {
+	for _, n := range benchSizes() {
+		b.Run(fmt.Sprintf("torrents=%d", n), func(b *testing.B) {
+			st := benchmarkState(n)
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				Aggregate(st)
+			}
+		})
+	}
+}

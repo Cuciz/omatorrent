@@ -79,6 +79,12 @@ type State struct {
 	ConnectionStatus string
 	Torrents         map[string]Torrent
 	LastError        string
+	// FreeSpace is qBittorrent's server_state.free_space_on_disk (free
+	// space on the disk of the default save path), committed with the
+	// same last-known-good discipline as the speeds and dropped on
+	// degradation — nil means unknown (never reported or degraded), NOT
+	// zero (ADR-0007).
+	FreeSpace *int64
 	// Generation increments on every committed change; it is the
 	// subscription sequence space (ADR-0005).
 	Generation uint64
@@ -335,6 +341,7 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 	// only fields actually present update the state; absent fields
 	// (including explicit-zero vs absent) keep the last known value.
 	next.DlSpeed, next.UpSpeed, next.ConnectionStatus = prev.DlSpeed, prev.UpSpeed, prev.ConnectionStatus
+	next.FreeSpace = prev.FreeSpace
 	if ss := md.ServerState; ss != nil {
 		if ss.DlInfoSpeed != nil {
 			next.DlSpeed = *ss.DlInfoSpeed
@@ -344,6 +351,10 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 		}
 		if ss.ConnectionStatus != nil {
 			next.ConnectionStatus = *ss.ConnectionStatus
+		}
+		if ss.FreeSpaceOnDisk != nil {
+			v := *ss.FreeSpaceOnDisk
+			next.FreeSpace = &v
 		}
 	}
 	next.BackendOK = true
@@ -382,6 +393,9 @@ func (s *Syncer) commitDegraded(err error) {
 	next := prev.shallowCopy()
 	next.BackendOK = false
 	next.DlSpeed, next.UpSpeed = 0, 0
+	// Unknown ≠ zero (ADR-0007): the daemon does not know the free
+	// space while the backend is unreachable.
+	next.FreeSpace = nil
 	next.LastError = classify(err)
 	s.cur = next
 	s.rid = 0     // next success must be a full rebuild

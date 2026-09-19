@@ -486,3 +486,50 @@ func TestPartialServerStateMerge(t *testing.T) {
 		t.Fatalf("full server_state: %+v", st)
 	}
 }
+
+// ---- free_space_on_disk commit semantics (Phase 0.4, ADR-0007) ----
+
+func TestFreeSpaceCommitAndDegraded(t *testing.T) {
+	fb := &fakeBackend{resps: []qbittorrent.Maindata{{
+		RID: 1, FullUpdate: true, Torrents: map[string]json.RawMessage{},
+		ServerState: &qbittorrent.ServerState{FreeSpaceOnDisk: ptrInt64(111)}},
+	}}
+	s := New(fb, Options{}, quietLogger())
+	if !s.cycle(context.Background(), time.Second) {
+		t.Fatal("first cycle failed")
+	}
+	if st := s.State(); st.FreeSpace == nil || *st.FreeSpace != 111 {
+		t.Fatalf("free space = %v, want 111", st.FreeSpace)
+	}
+
+	// Absent on a no-change delta: last known value kept.
+	fb.resps = append(fb.resps, qbittorrent.Maindata{RID: 2, Torrents: map[string]json.RawMessage{}})
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.FreeSpace == nil || *st.FreeSpace != 111 {
+		t.Fatalf("absent free space: %v, want last-known 111", st.FreeSpace)
+	}
+
+	// Present again: value updates.
+	fb.resps = append(fb.resps, qbittorrent.Maindata{RID: 3, Torrents: map[string]json.RawMessage{},
+		ServerState: &qbittorrent.ServerState{FreeSpaceOnDisk: ptrInt64(222)}})
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.FreeSpace == nil || *st.FreeSpace != 222 {
+		t.Fatalf("updated free space: %v, want 222", st.FreeSpace)
+	}
+
+	// Degradation: unknown, NOT zero.
+	fb.err = qbittorrent.ErrUnreachable
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.FreeSpace != nil {
+		t.Fatalf("degraded free space = %v, want nil (unknown)", *st.FreeSpace)
+	}
+
+	// Recovery without the key: still nil (never re-fabricated).
+	fb.err = nil
+	fb.resps = append(fb.resps, qbittorrent.Maindata{RID: 1, FullUpdate: true,
+		Torrents: map[string]json.RawMessage{}})
+	s.cycle(context.Background(), time.Second)
+	if st := s.State(); st.FreeSpace != nil {
+		t.Fatalf("recovered free space = %v, want nil until backend reports", *st.FreeSpace)
+	}
+}
