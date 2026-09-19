@@ -1,9 +1,11 @@
 // Package qbittorrent is the only qBittorrent-aware component of
 // omatorrent-service (ADR-0001/0002). It speaks the WebUI API v2.
 //
-// Capability facts and minimum versions live in docs/QBITTORRENT.md; this
-// Phase 0 client uses only 2.0-baseline read endpoints plus auth/login.
-// Credentials are never logged or exposed in errors.
+// Capability facts and minimum versions live in docs/QBITTORRENT.md.
+// The client keeps an HTTP cookie jar across requests: sync/maindata rid
+// tracking is session-scoped, and even the localhost auth bypass issues
+// a session cookie (verified live, docs/QBITTORRENT.md). Credentials are
+// never logged or exposed in errors.
 package qbittorrent
 
 import (
@@ -13,9 +15,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -29,24 +32,40 @@ var (
 	ErrUnexpectedState = errors.New("qbittorrent: unexpected response")
 )
 
-// TransferInfo is the subset of transfer/info OmaTorrent needs.
-type TransferInfo struct {
-	DlSpeed int64  `json:"dl_info_speed"`
-	UpSpeed int64  `json:"up_info_speed"`
-	Status  string `json:"connection_status"`
+// ServerState is the subset of sync/maindata server_state OmaTorrent
+// uses. The whole object is optional on delta responses (absent when
+// unchanged), and individual fields may be partial: pointer fields
+// distinguish "absent" from "present zero value". This representation
+// lives ONLY at the adapter boundary — the state layer merges present
+// fields into plain scalars.
+type ServerState struct {
+	DlInfoSpeed      *int64  `json:"dl_info_speed"`
+	UpInfoSpeed      *int64  `json:"up_info_speed"`
+	ConnectionStatus *string `json:"connection_status"`
+	FreeSpaceOnDisk  *int64  `json:"free_space_on_disk"`
 }
 
-// Client is a minimal WebUI API v2 client. It is safe for concurrent use.
-// A zero Username means the qBittorrent localhost auth bypass is assumed
-// and no login is attempted.
+// Maindata is one sync/maindata response. Torrents values are raw JSON:
+// full objects on full updates, PARTIAL objects (only changed fields)
+// on deltas — merging them is the state synchronizer's job, not the
+// adapter's.
+type Maindata struct {
+	RID             int64                      `json:"rid"`
+	FullUpdate      bool                       `json:"full_update"`
+	Torrents        map[string]json.RawMessage `json:"torrents"`
+	TorrentsRemoved []string                   `json:"torrents_removed"`
+	ServerState     *ServerState               `json:"server_state"`
+}
+
+// Client is a minimal WebUI API v2 client. It is safe for concurrent
+// use. A zero Username means the qBittorrent localhost auth bypass is
+// assumed and no login is attempted; the cookie jar still keeps the
+// bypass session (and thus rid-based incremental sync) stable.
 type Client struct {
 	base     *url.URL
 	hc       *http.Client
 	username string
 	password string
-
-	mu  sync.Mutex
-	sid *http.Cookie
 }
 
 // New creates a client for the WebUI base URL (e.g. http://127.0.0.1:8080).
@@ -60,17 +79,21 @@ func New(baseURL, username, password string) (*Client, error) {
 	if u.User != nil {
 		return nil, fmt.Errorf("qbittorrent: credentials in the URL are not supported; use the config username/password fields")
 	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("qbittorrent: cookie jar: %w", err)
+	}
 	return &Client{
 		base:     u,
-		hc:       &http.Client{Timeout: 5 * time.Second},
+		hc:       &http.Client{Timeout: 5 * time.Second, Jar: jar},
 		username: username,
 		password: password,
 	}, nil
 }
 
-// Login authenticates and stores the SID cookie. Skipped (no-op) when no
-// username is configured (localhost bypass). The wiki requires Referer or
-// Origin matching the Host header.
+// Login authenticates so the cookie jar holds a SID. Skipped (no-op)
+// when no username is configured (localhost bypass). The wiki requires
+// Referer or Origin matching the Host header.
 func (c *Client) Login(ctx context.Context) error {
 	if c.username == "" {
 		return nil
@@ -101,15 +124,7 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	switch string(body) {
 	case "Ok.":
-		for _, ck := range resp.Cookies() {
-			if ck.Name == "SID" {
-				c.mu.Lock()
-				c.sid = ck
-				c.mu.Unlock()
-				return nil
-			}
-		}
-		return fmt.Errorf("%w: login without SID cookie", ErrUnexpectedState)
+		return nil // SID now lives in the cookie jar
 	case "Fails.":
 		return ErrBadCredentials
 	default:
@@ -129,24 +144,20 @@ func (c *Client) WebAPIVersion(ctx context.Context) (string, error) {
 	return c.getText(ctx, "/api/v2/app/webapiVersion")
 }
 
-// TransferInfo returns global transfer speeds and connection status.
-func (c *Client) TransferInfo(ctx context.Context) (TransferInfo, error) {
-	var info TransferInfo
-	if err := c.get(ctx, "/api/v2/transfer/info", &info); err != nil {
-		return info, err
+// SyncMaindata fetches one sync/maindata response for the given rid.
+// rid semantics (docs/QBITTORRENT.md): 0 or a rid the backend session
+// does not recognize returns full_update=true with complete torrent
+// objects; a matching rid returns a partial delta. The session cookie
+// in the jar makes the rid stable across calls.
+func (c *Client) SyncMaindata(ctx context.Context, rid int64) (Maindata, error) {
+	var md Maindata
+	if rid < 0 {
+		rid = 0
 	}
-	return info, nil
-}
-
-// TorrentsCount returns the number of torrents via torrents/info length.
-// (torrents/count exists on the installed version but is undocumented in
-// the wiki; see docs/QBITTORRENT.md UNCERTAIN classification.)
-func (c *Client) TorrentsCount(ctx context.Context) (int, error) {
-	var raw []json.RawMessage
-	if err := c.get(ctx, "/api/v2/torrents/info", &raw); err != nil {
-		return 0, err
-	}
-	return len(raw), nil
+	// Response reads are memory-bounded in doFetch (64 MiB) — full
+	// updates of very large torrent sets stay far below that.
+	err := c.getJSON(ctx, "/api/v2/sync/maindata?rid="+strconv.FormatInt(rid, 10), &md)
+	return md, err
 }
 
 // getText performs an authenticated GET and returns the trimmed plain-text
@@ -156,11 +167,17 @@ func (c *Client) getText(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(body)), nil
+	v := strings.TrimSpace(string(body))
+	// Wire-budget defense: version strings land in IPC frames capped at
+	// 4096 bytes; a misbehaving endpoint returning megabytes must not
+	// breach that (review finding).
+	if r := []rune(v); len(r) > 64 {
+		v = string(r[:64])
+	}
+	return v, nil
 }
 
-// get performs an authenticated GET and decodes the JSON body into out.
-func (c *Client) get(ctx context.Context, path string, out any) error {
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	body, err := c.fetch(ctx, path)
 	if err != nil {
 		return err
@@ -190,12 +207,6 @@ func (c *Client) doFetch(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("qbittorrent: build %s: %w", path, err)
 	}
-	c.mu.Lock()
-	sid := c.sid
-	c.mu.Unlock()
-	if sid != nil {
-		req.AddCookie(sid)
-	}
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -210,7 +221,7 @@ func (c *Client) doFetch(ctx context.Context, path string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("%w: %s HTTP %d", ErrUnexpectedState, path, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<22))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<26))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s body: %v", ErrUnexpectedState, path, err)
 	}

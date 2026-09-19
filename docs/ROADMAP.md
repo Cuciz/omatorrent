@@ -19,7 +19,14 @@ Dependencies and exit criteria use the evidence rules from
 | 0.9 | CI, update/rollback, hardening | all | CI green on tagged runs; upgrade + rollback tested; release gates pass |
 | 1.0 | Release | 0.9 | full release gate run (omatorrent-release skill) READY verdict |
 
-## Phase 0 — technical foundation (DONE 2026-09-18, PR pending review)
+## Phase 0.2 — incremental state + panel (IMPLEMENTED 2026-09-18, PR pending review)
+
+Branch feat/phase02-incremental-panel, issue #3. sync/maindata rid sync
+(session cookie jar), daemon-side normalized state with last-known-good,
+IPC v1.1 subscriptions (ADR-0005), native popout panel (read-only),
+benchmarks 10/100/1000. See docs/agent/PHASE02.md.
+
+## Phase 0 — technical foundation (DONE 2026-09-18, merged via PR #2)
 
 Foundation proven end-to-end: bar widget → IPC v1 (ADR-0004, NDJSON,
 Unix socket) → omatorrent-service (Go) → qBittorrent WebAPI 2.15.1, with

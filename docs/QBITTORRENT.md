@@ -75,6 +75,55 @@ workstation backend (user's real torrents); their Phase 0 status is
 documented-only. Adapter behavior for them is fixture-tested when their
 phase arrives.
 
+## sync/maindata — confirmed behavior (Phase 0.2 research, 2026-09-18)
+
+Live-verified against qbittorrent-nox 5.2.3 / WebAPI 2.15.1 (read-only
+probes, cookie-jar session) and cross-checked with the official wiki.
+
+- FACT: rid semantics — rid=0 (or omitted) yields `full_update:true` with
+  a complete `torrents` map and full `server_state`; the response carries
+  the NEXT rid. Sending the last-received rid with the SAME session cookie
+  yields a delta (`full_update` absent/false, `torrents` empty when
+  nothing changed) and an incremented rid (observed 1 → 2).
+  SOURCE: live probes with curl cookie jar; wiki: "If the given rid is
+  different from the one of last server reply, full_update will be true".
+- FACT: **rid tracking is session-scoped.** Without a session cookie every
+  request is a fresh session: repeated same-rid requests each return
+  `full_update:true` and the same rid (observed with bare curl under the
+  localhost auth bypass). The bypass DOES set a `QBT_SID_<port>` cookie
+  (HttpOnly, SameSite=Lax) on responses — persisting the cookie jar makes
+  incremental sync work without credentials on this deployment.
+  IMPLICATION: the adapter must retain cookies across requests (Go
+  http.Client cookie jar); with credentials the SID from auth/login serves
+  the same role.
+- FACT: delta `torrents` entries are PARTIAL objects — only changed fields
+  (wiki example: `{"state":"pausedUP"}`; live full update carries 68
+  fields per torrent). Full-update entries are complete objects with the
+  `torrents/info` field set.
+  IMPLICATION: the daemon must field-merge deltas into its normalized
+  model, never replace entries wholesale on delta responses.
+- FACT: `torrents_removed` is an array of hashes removed since the last
+  request with that session. Observed empty/absent when nothing changed.
+- FACT: `server_state` (26 keys live: speeds, connection_status,
+  free_space_on_disk, dht_nodes, rate limits, use_alt_speed_limits, …) is
+  present on full updates and ABSENT on a no-change delta (observed
+  `null`). Whether a state change delivers partial or full server_state
+  is UNCERTAIN (cannot force a change read-only) — the adapter
+  defensively merges present fields and keeps last-known-good.
+- FACT: torrent `state` values on 5.2.3 use the `stalledUP`/`stalledDL`
+  family (live: stalledUP, stalledUP, stalledDL); wiki enumerates:
+  error, missingFiles, uploading, pausedUP, queuedUP, stalledUP,
+  checkingUP, forcedUP, allocating, downloading, metaDL, pausedDL,
+  queuedDL, stalledDL, checkingDL, forcedDL, checkingResumeData, moving,
+  unknown. (qBittorrent 5.x additionally exposes stoppedUP/stoppedDL
+  aliases in some responses — treat unknown values as `unknown`, never
+  reject.)
+- IMPLICATION (restart/resync): a qBittorrent restart forgets the
+  session/rid → next request returns `full_update:true`. The daemon
+  treats ANY `full_update:true` as a rebuild signal and never assumes
+  its rid survived.
+- Non-goal confirmed: `sync/torrentPeers` not needed for 0.2.
+
 ## Adapter rules derived from this matrix
 
 1. Auth: `POST auth/login` (Referer/Origin matching Host), SID cookie reuse;
@@ -83,7 +132,9 @@ phase arrives.
    work in both modes without logging secrets.
 2. Always probe `app/webapiVersion` at connect; compare against the
    capability matrix before using any endpoint above the 2.0 baseline.
-3. State sync: rid-based `sync/maindata` deltas; never re-poll full data.
+3. State sync: rid-based `sync/maindata` deltas with a persistent cookie
+   jar; the daemon rebuilds from `full_update:true` responses (rid=0,
+   session loss, backend restart) instead of re-polling on its own.
 4. Minimum supported WebAPI version: **PROPOSED 2.3.0** (highest minimum
    among endpoints OmaTorrent needs before 1.0: tags). The reference
    deployment is 2.15.1; a formal compat matrix is a later-phase task —

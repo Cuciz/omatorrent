@@ -58,6 +58,17 @@ OmaqBT (a torrent shell mentioned as prior art) is NOT present on this
 machine; nothing could be inspected or verified — recorded as NOT
 AVAILABLE, no assumptions imported from it.
 
+## Popout panel pattern (verified against clock, first-party)
+
+Bar widget hosts a `Loader` to `Panel.qml`; the panel extends `Ui.Panel`
+(moduleName, manageIpc:false) and renders inside `Ui.KeyboardPanel`
+(anchorItem = the bar button, owner = host widget, contentWidth/Height,
+Color.popups surface + Style.cornerRadius handled by the base).
+`PanelKeyCatcher` provides close-on-focus-loss and panel switching. The
+widget exposes open()/close()/toggle()/opened so `omarchy-shell shell
+toggle <id>` works. Reference: /usr/share/omarchy/shell/plugins/panels/
+clock/{BarWidget,Panel}.qml; OmaTorrent's implementation mirrors it.
+
 ## IPC client rules (verified against Quickshell 0.3.1)
 
 - Use `Quickshell.Io` `Socket` (QLocalSocket → Unix domain on Linux):

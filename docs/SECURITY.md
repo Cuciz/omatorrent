@@ -55,6 +55,13 @@ recorded in docs/agent/PHASE0.md per change.
   are served exclusively from the background refresher's cache — no IPC
   request ever contacts qBittorrent; before the first refresh the
   degraded shapes are returned.
+- v1.1 subscriptions (ADR-0005): read-only; every frame ≤ 4096 bytes
+  (snapshot chunked, deltas split, torrent names capped at 512 runes);
+  live-delta outbound queue bounded at 256 frames per connection (the
+  initial snapshot uses bounded backpressure instead) — a slow or
+  malicious subscriber is disconnected, never able to grow daemon
+  memory; no mutation operations exist. Version probes and names never
+  include secrets; hashes/names/state only.
 - Same-UID processes are inside the filesystem trust boundary
   (documented in ADR-0004): a same-user attacker can race path checks.
   Cross-UID protection is what the 0600/0700 permissions provide.

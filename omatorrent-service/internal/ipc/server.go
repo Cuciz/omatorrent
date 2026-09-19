@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,12 +31,21 @@ type Handler interface {
 	StatusData() (StatusData, bool)
 }
 
+// Subscriptions supplies torrent state for v1.1 subscriptions
+// (ADR-0005). Subscribe returns the committed full state and a channel
+// of subsequent changes; cancel stops delivery. Implementations must
+// close the channel when the subscriber is dropped.
+type Subscriptions interface {
+	Subscribe() (items []TorrentItem, events <-chan DeltaEvent, cancel func())
+}
+
 // Server is the IPC v1 Unix-socket server. Socket lifecycle follows
 // ADR-0004: fail closed on unsafe paths, refuse any existing socket path,
 // never auto-delete, remove on shutdown only by file identity.
 type Server struct {
 	socketPath string
 	handler    Handler
+	subs       Subscriptions
 	log        *slog.Logger
 
 	ln        net.Listener
@@ -152,7 +162,7 @@ func ensureAppDir(dir string) error {
 
 // New validates the socket path and prepares the server. Call Serve to
 // accept connections.
-func New(socketPath string, handler Handler, log *slog.Logger) (*Server, error) {
+func New(socketPath string, handler Handler, subs Subscriptions, log *slog.Logger) (*Server, error) {
 	if handler == nil {
 		return nil, fmt.Errorf("ipc: nil handler")
 	}
@@ -162,6 +172,7 @@ func New(socketPath string, handler Handler, log *slog.Logger) (*Server, error) 
 	return &Server{
 		socketPath: socketPath,
 		handler:    handler,
+		subs:       subs,
 		log:        log,
 		clients:    make(map[net.Conn]struct{}),
 	}, nil
@@ -399,18 +410,22 @@ func (s *Server) Close() {
 	})
 }
 
-// handle runs one connection: handshake, then the request loop.
+// handle runs one connection: handshake, then the request loop. All
+// writes (responses and v1.1 pushes) are serialized through a bounded
+// outbound queue drained by one writer goroutine; a full queue or a
+// failed write tears the connection down (ADR-0005 slow-consumer rule).
 func (s *Server) handle(conn net.Conn) {
+	c := newConnIO(conn)
 	defer func() {
 		s.mu.Lock()
 		delete(s.clients, conn)
 		s.mu.Unlock()
-		conn.Close()
+		c.teardown()
 	}()
 
 	reader := bufio.NewReaderSize(conn, MaxFrame)
 
-	// Handshake.
+	// Handshake (direct write; queue not started yet).
 	conn.SetDeadline(time.Now().Add(handshakeDeadline))
 	req, err := readRequest(reader)
 	if err != nil {
@@ -434,6 +449,12 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	conn.SetDeadline(time.Time{}) // clear; loop sets read deadlines
 
+	// Writer goroutine owns the socket from here on.
+	c.sendMu.Lock()
+	c.writerStarted = true
+	c.sendMu.Unlock()
+	go c.writer()
+
 	for {
 		conn.SetReadDeadline(time.Now().Add(idleReadDeadline))
 		req, err := readRequest(reader)
@@ -444,35 +465,267 @@ func (s *Server) handle(conn net.Conn) {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				return // idle timeout: close without error frame
 			}
-			s.fail(conn, err)
+			c.send(EncodeError(failCode(err)))
 			return
 		}
 
 		switch req.Type {
 		case "hello":
-			s.fail(conn, errUnsupported)
+			c.send(EncodeError(failCode(errUnsupported)))
 			return
 		case "health":
-			ok := s.handler.Health()
-			if err := writeFrame(conn, EncodeHealth(req.ID, ok)); err != nil {
-				return
-			}
+			c.send(EncodeHealth(req.ID, s.handler.Health()))
 		case "system.status":
 			data, ok := s.handler.StatusData()
-			if err := writeFrame(conn, EncodeStatus(req.ID, ok, data)); err != nil {
+			c.send(EncodeStatus(req.ID, ok, data))
+		case "torrent.subscribe":
+			if s.subs == nil {
+				c.send(EncodeError(failCode(errUnsupported)))
 				return
 			}
+			if c.markSubscribed() {
+				s.startSubscription(c, req.ID) // delivers subscribed + snapshot with backpressure
+			} else {
+				// One subscription per connection; the existing one keeps
+				// working and the connection stays open (documented in
+				// docs/IPC.md v1.1 lifecycle).
+				c.send(EncodeError(failCode(errUnsupported)))
+			}
 		default:
-			s.fail(conn, errUnsupported)
+			c.send(EncodeError(failCode(errUnsupported)))
+			return
+		}
+		if !c.alive() {
 			return
 		}
 	}
 }
 
-// fail sends the mapped error frame and closes (all protocol errors close
-// the connection; payload is never echoed).
+// startSubscription delivers the full snapshot with BACKPRESSURE and
+// then hands the connection to the delta pump (ADR-0005 flow control,
+// review finding 6): snapshot frames wait for queue space (bounded
+// memory, single writer, no healthy-subscriber disconnect merely
+// because the snapshot is larger than the delta queue), while live
+// deltas use the bounded non-blocking queue with disconnect-on-overflow.
+// A change committed during snapshot delivery waits in the events
+// channel and is delivered strictly after snapshot.end (subscription
+// registration is atomic with the snapshot's committed generation).
+func (s *Server) startSubscription(c *connIO, id int64) {
+	items, events, cancel := s.subs.Subscribe()
+	c.setSubCancel(cancel)
+
+	sortItems(items)
+
+	deadline := time.Now().Add(snapshotDeliveryTimeout)
+	abort := func() {
+		cancel()
+		c.teardown()
+	}
+	if !c.sendBlocking(EncodeSubscribed(id), deadline) {
+		abort()
+		return
+	}
+	if !c.sendBlocking(EncodeSnapshotBegin(id, len(items)), deadline) {
+		abort()
+		return
+	}
+	for i := range items {
+		frame := EncodeSnapshotItem(id, i, items[i])
+		if frame == nil {
+			// Cannot be framed: abort rather than silently omit.
+			abort()
+			return
+		}
+		if !c.sendBlocking(frame, deadline) {
+			abort()
+			return
+		}
+	}
+	if !c.sendBlocking(EncodeSnapshotEnd(id), deadline) {
+		abort()
+		return
+	}
+
+	go func() {
+		for ev := range events {
+			frames, ok := EncodeDeltas(ev)
+			if !ok {
+				// A committed update cannot be framed — terminate the
+				// subscriber so it reconnects and rebuilds (no silent
+				// loss).
+				cancel()
+				c.teardown()
+				return
+			}
+			for _, frame := range frames {
+				if !c.send(frame) {
+					cancel()
+					return
+				}
+			}
+		}
+		// events closed: the state source dropped us; the client must
+		// rebuild on a fresh connection.
+		c.teardown()
+	}()
+}
+
+// sortItems gives the snapshot a deterministic wire order (name, hash).
+func sortItems(items []TorrentItem) {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Name != items[j].Name {
+			return items[i].Name < items[j].Name
+		}
+		return items[i].Hash < items[j].Hash
+	})
+}
+
+// fail sends the mapped error frame directly (pre-queue, handshake
+// phase only); payload is never echoed.
 func (s *Server) fail(conn net.Conn, err error) {
 	writeFrame(conn, EncodeError(failCode(err)))
+}
+
+// connIO serializes writes for one connection with a bounded queue.
+type connIO struct {
+	conn net.Conn
+	out  chan []byte
+
+	sendMu        sync.Mutex
+	closed        bool
+	writerStarted bool
+	subMu         sync.Mutex
+	subCancel     func()
+	subscribed    bool
+}
+
+const outQueue = 256 // frames per connection for LIVE deltas (ADR-0005)
+
+// snapshotDeliveryTimeout bounds the total backpressured delivery of
+// one full snapshot; a subscriber that cannot drain it in this window
+// is disconnected (slow-consumer rule).
+var snapshotDeliveryTimeout = 30 * time.Second
+
+func newConnIO(conn net.Conn) *connIO {
+	return &connIO{conn: conn, out: make(chan []byte, outQueue)}
+}
+
+func (c *connIO) alive() bool {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	return !c.closed
+}
+
+// send enqueues one frame (without LF); false means the connection is
+// gone or the consumer is too slow and was disconnected.
+func (c *connIO) send(frame []byte) bool {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return false
+	}
+	f := append(frame, '\n')
+	select {
+	case c.out <- f:
+		return true
+	default:
+		c.closed = true
+		close(c.out)
+		c.cancelSubLocked()
+		if !c.writerStarted {
+			c.conn.Close()
+		}
+		return false
+	}
+}
+
+// sendBlocking enqueues one frame, WAITING for queue space until the
+// deadline (snapshot backpressure): bounded memory without
+// disconnecting a healthy subscriber whose snapshot simply exceeds the
+// live-delta queue size. false means timeout/teardown.
+func (c *connIO) sendBlocking(frame []byte, deadline time.Time) bool {
+	f := append(frame, '\n')
+	for {
+		c.sendMu.Lock()
+		if c.closed {
+			c.sendMu.Unlock()
+			return false
+		}
+		select {
+		case c.out <- f:
+			c.sendMu.Unlock()
+			return true
+		default:
+		}
+		c.sendMu.Unlock()
+		if time.Now().After(deadline) {
+			c.teardown()
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// teardown stops the queue and closes the connection (idempotent).
+// Frames already enqueued are still drained by the writer before it
+// closes the socket, so terminal error frames reach the client.
+func (c *connIO) teardown() {
+	c.sendMu.Lock()
+	if c.closed {
+		c.sendMu.Unlock()
+		return
+	}
+	c.closed = true
+	started := c.writerStarted
+	close(c.out)
+	c.sendMu.Unlock()
+	c.cancelSubLocked()
+	if !started {
+		c.conn.Close() // no writer running; close directly
+	}
+}
+
+func (c *connIO) setSubCancel(cancel func()) {
+	c.subMu.Lock()
+	c.subCancel = cancel
+	c.subMu.Unlock()
+}
+
+// markSubscribed latches the one-subscription-per-connection rule
+// atomically (read loop is single-threaded, but keep it structural).
+func (c *connIO) markSubscribed() bool {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	if c.subscribed {
+		return false
+	}
+	c.subscribed = true
+	return true
+}
+
+func (c *connIO) cancelSubLocked() {
+	c.subMu.Lock()
+	fn := c.subCancel
+	c.subCancel = nil
+	c.subMu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// writer drains the outbound queue to the socket, then closes it. A
+// failed write tears the connection down immediately so a blocked
+// sendBlocking (snapshot backpressure) unblocks instead of spinning to
+// its deadline.
+func (c *connIO) writer() {
+	for f := range c.out {
+		c.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+		if _, err := c.conn.Write(f); err != nil {
+			c.teardown()
+			return
+		}
+	}
+	c.conn.Close()
 }
 
 // readRequest reads one LF-terminated frame and parses it. Errors are

@@ -12,6 +12,13 @@ evidence; "code looks right" is never sufficient.
 
 ## Suite layout (as built in Phase 0)
 
+- **Sync/state (0.2)** — `internal/state/syncer_test.go`: rid=0 full
+  update, incremental changed/added/removed, empty delta, malformed
+  delta AND full payloads preserve last-known-good, backend-restart
+  rebuild (no ghosts, correct rebuild delta), degraded/recover, state
+  normalization table, pre-Run cache purity (zero backend calls),
+  concurrent readers, cancel. `syncer_bench_test.go`: benchmarks at
+  10/100/1000 torrents (full rebuild, 10-item delta, state read).
 - **Unit tests** — next to the Go code (`cd omatorrent-service &&
   go test -race ./...`):
   - `internal/ipc/protocol_test.go` — grammar acceptance/rejection and
@@ -44,6 +51,11 @@ evidence; "code looks right" is never sufficient.
   scripted: live probes (`/api/v2/app/version`, `webapiVersion`,
   `transfer/info`, `sync/maindata` deltas — read-only), daemon ↔ real
   qbittorrent-nox via `ot-probe` (systemd-run), no mutations.
+- **IPC v1.1 subscriptions** — snapshot frame sequence (name-sorted,
+  count/index/id), delta push, delta chunking (bounded frames, shared
+  seq), invalid subscribe schema, reconnect/resubscribe with fresh
+  snapshot, name cap, slow-subscriber disconnect, v1.0 requests still
+  served on a subscribed connection.
 - **Shell checks** — `omarchy plugin validate` (manifest schema),
   `tools/test_quickshell.sh` (isolated `qs` instance speaking IPC v1 to
   the daemon with the widget's one-in-flight/id-matching discipline,
