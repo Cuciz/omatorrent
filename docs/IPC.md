@@ -254,7 +254,9 @@ replayed onto existing connections, so **clients must not depend on
 receiving a push.** Clients resolve pending mutations through the state
 stream itself, and MAY resolve them with a same-ref watchdog: after a
 bounded window, re-send the SAME `ref` with identical parameters — the
-daemon answers from its recorded outcome (no backend execution).
+daemon answers from its recorded outcome (no backend execution; the
+record is the per-process 64-slot ring, so the replay-rules limits
+below apply).
 `torrent.remove` is NEVER automatically re-sent (fresh confirmation
 required); its pending overlay escalates to the ambiguous state and the
 row settles via the snapshot/deltas. A client must never automatically

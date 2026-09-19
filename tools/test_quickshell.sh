@@ -242,6 +242,17 @@ ShellRoot {
       if (st.pending[H] !== undefined) errs.push("duplicate push recreated overlay")
     }
 
+    // Defense in depth (security re-review F-1): a push MISSING its
+    // mutation id must never correlate with a begin-stage pending via
+    // undefined === undefined.
+    {
+      const st = MC.newState()
+      MC.begin(st, 1, "torrent.pause", H, "", false, "r1", 1000)
+      const r = MC.onResultPush(st, { action: "torrent.pause", hash: H, status: "confirmed" })
+      if (r.applied || st.pending[H] === undefined) errs.push("id-less push correlated with begin-stage pending")
+      if (st.earlyOrder.length !== 1) errs.push("id-less push not buffered")
+    }
+
     // Early-result buffer is bounded (FIFO eviction).
     {
       const st = MC.newState()

@@ -169,6 +169,10 @@ One accepted finding + one documentation-integrity finding:
    overlay escalates to the ambiguity banner and the row settles via
    the state stream. ADR-0006 + docs/IPC.md updated accordingly.
 
+Harness fix surfaced by re-validation: smoke refs are now run-unique
+(fixed refs correctly collided with the daemon's per-process ref ring
+across runs → ref_conflict — correct daemon behavior, harness bug).
+
 New tests: deterministic ordering battery in tools/test_quickshell.sh
 (both legal orders × pause/resume/remove/add, the add stuck-overlay
 regression, reset-clears-early-buffer, post-reset stray accepted,
@@ -180,6 +184,31 @@ both frames in either order, connection stays healthy).
 Destructive safety unchanged: delete_files required boolean, no
 defaults, one hash, never `all`, ref-replay protection, no automatic
 destructive retry with a fresh ref, committed state as source of truth.
+
+### Re-review verdicts (head 7e1c53f; all six mandated points verified)
+
+- **Architecture: APPROVE-WITH-NOTES.** All six points VERIFIED with
+  file:line evidence (order-independence by construction, add
+  early-result trace, bounds/reset, delivery-guarantee accuracy,
+  watchdog/never-remove, docs match). Notes: rename the internal
+  `deleteFiles` record field (qB form-field name reserved for
+  daemon-side code) — APPLIED (now `delFiles`); preserve the queried
+  latch across add re-registration — APPLIED; state the ring bound at
+  the watchdog sentence — APPLIED.
+- **Security: PASS-WITH-FINDINGS.** All six points CONFIRMED-SAFE,
+  verified by an adversarial node harness against the real JS (flood
+  100k pushes → buffer stays ≤ 16; malformed frames → zero throws) and
+  by code audit. One LOW defense-in-depth finding: an id-less push
+  could correlate via undefined === undefined — unreachable (daemon
+  always emits the id; panel type-guards), hardening APPLIED +
+  regression test added. INFO: watchdog double-loss staleness
+  (self-healing, documented tradeoff); ring-bound wording — APPLIED.
+- **QA: READY-FOR-REVIEW.** All 10 checks reproduced on 7e1c53f,
+  including two back-to-back live smokes (ordering battery + 10/10
+  mutation stages, real count 3 → 3, no ref_conflict on a warm ring),
+  full race suite, harness 82/82, guard 39/39, plugin validate (with
+  negative controls), git hygiene (7 commits), daemon journal clean,
+  real-file import cross-check. Zero defects, zero flakes.
 
 ## Known limitations
 

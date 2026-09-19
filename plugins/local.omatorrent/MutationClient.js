@@ -30,10 +30,10 @@
 var MAX_EARLY = 16
 
 // newState creates the per-connection state bag.
-//   pending:  hash -> {action, mutation?, ref, hash, url, deleteFiles, since, queried?}
+//   pending:  hash -> {action, mutation?, ref, hash, url, delFiles, since, queried?}
 //   early:    mutation id -> terminal result object (bounded, FIFO)
 //   earlyOrder: mutation ids in insertion order (for bounded eviction)
-//   inflight: {id, action, hash, url, deleteFiles, ref} of the one
+//   inflight: {id, action, hash, url, delFiles, ref} of the one
 //             outstanding request, or null (lockstep client discipline)
 function newState() {
   return { pending: {}, early: {}, earlyOrder: [], inflight: null }
@@ -41,18 +41,18 @@ function newState() {
 
 // begin records the intent at REQUEST time (one in flight). hash is ""
 // for torrent.add (the daemon derives and reports it at acceptance).
-function begin(st, id, action, hash, url, deleteFiles, ref, now) {
+function begin(st, id, action, hash, url, delFiles, ref, now) {
   if (st.inflight !== null) return false
   st.inflight = {
     id: id, action: action, hash: hash || "", url: url || "",
-    deleteFiles: !!deleteFiles, ref: ref, since: now
+    delFiles: !!delFiles, ref: ref, since: now
   }
   // Overlays for hash-carrying actions appear immediately (cosmetic,
   // never authoritative). torrent.add gets its overlay only at
   // acceptance, when the daemon reports the parsed infohash.
   if (st.inflight.hash !== "") {
     st.pending[hash] = {
-      action: action, ref: ref, hash: hash, url: "", deleteFiles: !!deleteFiles,
+      action: action, ref: ref, hash: hash, url: "", delFiles: !!delFiles,
       since: now
     }
   }
@@ -106,9 +106,12 @@ function onAccepted(st, msg) {
   }
 
   if (msg.action === "torrent.add") {
+    var prevAdd = st.pending[msg.hash]
     st.pending[msg.hash] = {
       action: msg.action, mutation: msg.mutation, ref: req.ref,
-      hash: msg.hash, url: req.url, deleteFiles: false, since: req.since || 0
+      hash: msg.hash, url: req.url, delFiles: false, since: req.since || 0,
+      // Preserve the watchdog latch across a duplicate acceptance.
+      queried: prevAdd !== undefined ? prevAdd.queried : undefined
     }
   } else {
     var e = st.pending[msg.hash]
@@ -117,7 +120,7 @@ function onAccepted(st, msg) {
     } else {
       st.pending[msg.hash] = {
         action: msg.action, mutation: msg.mutation, ref: req.ref,
-        hash: msg.hash, url: "", deleteFiles: req.deleteFiles,
+        hash: msg.hash, url: "", delFiles: req.delFiles,
         since: req.since || 0
       }
     }
@@ -130,9 +133,15 @@ function onAccepted(st, msg) {
 //                               overlay is cleared
 //   {applied:false, buffered} — mutation id unknown yet (early result)
 //                               or foreign/duplicate (harmless)
+// Correlation requires a PRESENT mutation id on both sides: a frame
+// missing `mutation` must never match a begin-stage pending through
+// undefined === undefined (defense in depth — the daemon always emits
+// the field and the panel type-guards it; this module is shared
+// reusable logic, so it enforces its own invariants).
 function onResultPush(st, msg) {
   var e = st.pending[msg.hash]
-  if (e && e.action === msg.action && e.mutation === msg.mutation) {
+  if (msg.mutation !== undefined && e && e.mutation !== undefined &&
+      e.action === msg.action && e.mutation === msg.mutation) {
     delete st.pending[msg.hash]
     return { applied: true, action: msg.action, hash: msg.hash, status: msg.status }
   }
