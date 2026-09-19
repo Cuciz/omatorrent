@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sprout brand asset: compact sprout glyph (12x10 grid) for 16-32 px surfaces. Deterministic output of assets/brand/generate.py — edit the grids there, not this file. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="72" viewBox="0 0 96 72" shape-rendering="crispEdges">
+  <rect x="48" y="8" width="32" height="8" fill="#A1D06A"/>
+  <rect x="8" y="16" width="32" height="8" fill="#A1D06A"/>
+  <rect x="48" y="16" width="40" height="8" fill="#A1D06A"/>
+  <rect x="8" y="24" width="32" height="8" fill="#A1D06A"/>
+  <rect x="48" y="24" width="40" height="8" fill="#A1D06A"/>
+  <rect x="8" y="32" width="80" height="8" fill="#A1D06A"/>
+  <rect x="16" y="40" width="64" height="8" fill="#A1D06A"/>
+  <rect x="32" y="48" width="40" height="8" fill="#A1D06A"/>
+  <rect x="40" y="56" width="16" height="8" fill="#A1D06A"/>
+  <rect x="40" y="64" width="16" height="8" fill="#A1D06A"/>
+  <rect x="40" y="72" width="16" height="8" fill="#A1D06A"/>
+</svg>
