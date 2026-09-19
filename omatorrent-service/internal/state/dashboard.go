@@ -86,12 +86,12 @@ func Aggregate(st State) Dashboard {
 		d.Aggregate.TotalSize = satAdd(d.Aggregate.TotalSize, t.Size)
 		d.Aggregate.CompletedBytes = satAdd(d.Aggregate.CompletedBytes, t.Completed)
 		// Per-torrent clamp before summing: completed > size on one
-		// torrent must never make the total remaining negative.
-		rem := t.Size - t.Completed
-		if rem < 0 {
-			rem = 0
+		// torrent must never make the total remaining negative. Compare
+		// first, then saturating-subtract — a raw Size-Completed can
+		// wrap positive when backend values are extreme (review finding).
+		if t.Size > t.Completed {
+			d.Aggregate.RemainingBytes = satAdd(d.Aggregate.RemainingBytes, satAdd(t.Size, -t.Completed))
 		}
-		d.Aggregate.RemainingBytes = satAdd(d.Aggregate.RemainingBytes, rem)
 		if t.DlSpeed > 0 || t.UpSpeed > 0 {
 			d.Counts.Active++
 			cands = append(cands, cand{

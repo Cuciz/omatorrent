@@ -132,3 +132,22 @@ func names(items []DashboardActiveItem) []string {
 	}
 	return out
 }
+
+func TestAggregateRemainingExtremeValues(t *testing.T) {
+	// Review finding: a raw Size-Completed subtraction can wrap positive
+	// for extreme backend values (e.g. size=MinInt64). Compare-first +
+	// saturating-subtract must keep remaining bounded and never negative.
+	st := State{Torrents: map[string]Torrent{
+		"a": {Hash: "a", State: StateSeeding, Size: math.MinInt64, Completed: 1},
+		"b": {Hash: "b", State: StateSeeding, Size: math.MaxInt64, Completed: -1},
+	}}
+	d := Aggregate(st)
+	if d.Aggregate.RemainingBytes < 0 {
+		t.Fatalf("remaining wrapped negative: %d", d.Aggregate.RemainingBytes)
+	}
+	// MinInt64 size with completed 1: size <= completed → contributes 0.
+	// MaxInt64 size with completed -1: saturates at MaxInt64.
+	if d.Aggregate.RemainingBytes != math.MaxInt64 {
+		t.Fatalf("remaining = %d, want saturating MaxInt64", d.Aggregate.RemainingBytes)
+	}
+}

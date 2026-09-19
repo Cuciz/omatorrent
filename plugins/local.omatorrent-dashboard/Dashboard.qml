@@ -539,11 +539,14 @@ Item {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
-                    // First-party routing (menu model): hide this
-                    // overlay, then summon the bar-widget panel.
+                    // First-party routing (menu model): dismiss this
+                    // overlay, then summon the bar-widget panel via the
+                    // documented host CLI — the capability-scoped shell
+                    // API a plugin receives cannot summon OTHER plugins
+                    // (PluginShellApi gate), but the CLI routes through
+                    // the host itself.
                     root.dismiss()
-                    if (root.shell && typeof root.shell.summon === "function")
-                      root.shell.summon("local.omatorrent")
+                    Util.execDetached("omarchy-shell shell summon local.omatorrent")
                   }
                 }
               }

@@ -289,17 +289,24 @@ type DashboardData struct {
 	LastKnown     *DashboardLastKnownData
 }
 
-// Active-name wire cap and the frame budget headroom for the ok shape
-// (ADR-0007: names capped at 48 runes; pathological names halve, then
-// trailing active entries drop — counts.active stays truthful).
+// Active-name wire cap (ADR-0007: names capped at 48 runes; pathological
+// names halve, then trailing active entries drop — counts.active stays
+// truthful). Version strings are capped too so the base shape is
+// bounded regardless of what a backend probe returned (the adapter caps
+// at its layer as well; the encoder enforces the wire invariant itself).
 const (
 	dashboardActiveNameCapRunes = 48
-	dashboardFrameBudget        = 3800
+	dashboardVersionCapRunes    = 64
+	// ActiveListWireCap mirrors state.ActiveListCap (5) at the encoder:
+	// a future provider must not be able to push an unbounded list in.
+	ActiveListWireCap = 5
 )
 
 // EncodeDashboardStatus encodes the v1.3 response. The degraded shape
 // carries no names and always fits; the ok shape is guarded against the
-// frame budget by name-halving and then trailing-entry drops.
+// frame budget by name-halving and then trailing-entry drops. All
+// string inputs are capped here, so with zero active entries the base
+// shape provably fits MaxFrame; the drop loop is defense in depth.
 func EncodeDashboardStatus(id int64, ok bool, d DashboardData) []byte {
 	if !ok {
 		resp := dashboardStatusDegradedResponse{
@@ -308,8 +315,8 @@ func EncodeDashboardStatus(id int64, ok bool, d DashboardData) []byte {
 		}
 		if d.LastKnown != nil {
 			resp.LastKnown = &dashboardLastKnown{
-				AppVersion:    d.LastKnown.AppVersion,
-				WebAPIVersion: d.LastKnown.WebAPIVersion,
+				AppVersion:    capString(d.LastKnown.AppVersion, dashboardVersionCapRunes),
+				WebAPIVersion: capString(d.LastKnown.WebAPIVersion, dashboardVersionCapRunes),
 				Counts:        d.LastKnown.Counts,
 				Aggregate:     d.LastKnown.Aggregate,
 			}
@@ -317,10 +324,17 @@ func EncodeDashboardStatus(id int64, ok bool, d DashboardData) []byte {
 		return mustMarshal(resp)
 	}
 
+	if len(d.Active) > ActiveListWireCap {
+		d.Active = d.Active[:ActiveListWireCap] // defense in depth: provider caps at 5
+	}
 	nameCap := dashboardActiveNameCapRunes
 	items := make([]dashboardActiveItem, len(d.Active))
 	for {
-		for i, it := range d.Active {
+		// Refill over the CURRENT items length only: after a trailing
+		// drop the slice is shorter than d.Active (review finding: the
+		// full-range refill indexed past the truncated slice).
+		for i := range items {
+			it := d.Active[i]
 			items[i] = dashboardActiveItem{
 				Name:     capString(it.Name, nameCap),
 				State:    it.State,
@@ -329,19 +343,21 @@ func EncodeDashboardStatus(id int64, ok bool, d DashboardData) []byte {
 				UpSpeed:  it.UpSpeed,
 			}
 		}
-		cur := items[:len(items)]
+		var cur []dashboardActiveItem = items
 		if len(cur) == 0 {
-			// Always a JSON array, never null.
-			cur = []dashboardActiveItem{}
+			cur = []dashboardActiveItem{} // always a JSON array, never null
 		}
 		b := mustMarshal(dashboardStatusOKResponse{
 			Type: "dashboard.status", Protocol: ProtocolVersion, ID: id,
-			QBittorrent: "ok",
-			AppVersion:  d.AppVersion, WebAPIVersion: d.WebAPIVersion,
-			DlSpeed: d.DlSpeed, UpSpeed: d.UpSpeed,
-			FreeSpace: d.FreeSpace,
-			Counts:    d.Counts, Aggregate: d.Aggregate,
-			Active: cur,
+			QBittorrent:   "ok",
+			AppVersion:    capString(d.AppVersion, dashboardVersionCapRunes),
+			WebAPIVersion: capString(d.WebAPIVersion, dashboardVersionCapRunes),
+			DlSpeed:       d.DlSpeed,
+			UpSpeed:       d.UpSpeed,
+			FreeSpace:     d.FreeSpace,
+			Counts:        d.Counts,
+			Aggregate:     d.Aggregate,
+			Active:        cur,
 		})
 		if len(b)+1 <= MaxFrame {
 			return b
@@ -351,7 +367,11 @@ func EncodeDashboardStatus(id int64, ok bool, d DashboardData) []byte {
 			continue
 		}
 		if len(items) == 0 {
-			return b // unreachable: the base shape fits the budget
+			// Unreachable in practice: every string is capped, so the
+			// empty-active base shape fits the budget. Returning the
+			// frame here is still the safer failure than nil (the
+			// caller treats nil as "cannot frame").
+			return b
 		}
 		items = items[:len(items)-1]
 	}
@@ -551,8 +571,16 @@ func EncodeStatus(id int64, ok bool, d StatusData) []byte {
 	}
 	return mustMarshal(statusOKResponse{
 		Type: "system.status", Protocol: ProtocolVersion, ID: id,
-		QBittorrent: "ok", AppVersion: d.AppVersion, WebAPIVersion: d.WebAPIVersion,
-		DlSpeed: d.DlSpeed, UpSpeed: d.UpSpeed, TorrentsTotal: d.TorrentsTotal,
+		QBittorrent: "ok",
+		// Version strings capped so the frame invariant holds even if a
+		// backend probe returned a pathological string (same class as
+		// the v1.3 encoder; real versions are ~6 chars, the cap never
+		// bites in practice).
+		AppVersion:    capString(d.AppVersion, dashboardVersionCapRunes),
+		WebAPIVersion: capString(d.WebAPIVersion, dashboardVersionCapRunes),
+		DlSpeed:       d.DlSpeed,
+		UpSpeed:       d.UpSpeed,
+		TorrentsTotal: d.TorrentsTotal,
 	})
 }
 

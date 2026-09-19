@@ -128,9 +128,12 @@ func TestDashboardStatusDegradedShapes(t *testing.T) {
 }
 
 func TestDashboardStatusFrameBudget(t *testing.T) {
-	// Pathological names: every active entry max-length CJK (worst-case
-	// \uXXXX escaping). The encoder must keep the frame within budget.
-	long := strings.Repeat("世", 512)
+	// Pathological names: every active entry max-length CONTROL runes —
+	// the true amplification worst case (encoding/json \uXXXX-escapes
+	// control characters at 6 bytes each but passes CJK through as
+	// UTF-8; review finding: the original CJK premise understated this).
+	// The encoder must keep the frame within budget.
+	long := strings.Repeat("\x01", 512)
 	d := DashboardData{
 		AppVersion: "v5.2.3", WebAPIVersion: "2.15.1",
 		DlSpeed: math.MaxInt64, UpSpeed: math.MaxInt64,
@@ -158,6 +161,67 @@ func TestDashboardStatusFrameBudget(t *testing.T) {
 	// Halving guard then entry drops: entries may be fewer than 5, names
 	// may be truncated, but the frame stays truthful and parseable.
 	t.Logf("worst-case frame: %d bytes, %d active entries", len(b), len(resp.Active))
+}
+
+func TestDashboardStatusBudgetDropPath(t *testing.T) {
+	// Pins the encoder against the review-found crash class: a caller
+	// handing the encoder more than ActiveListWireCap entries with
+	// amplifying names must get a bounded, valid frame — never a panic
+	// (the refill loop once indexed past a truncated slice). With every
+	// string capped, the halving/drop guards are structurally
+	// unreachable defense in depth; this drives the entry-cap truncation
+	// that precedes them.
+	d := DashboardData{
+		AppVersion: "v5.2.3", WebAPIVersion: "2.15.1",
+		Counts:    DashboardCounts{Total: 100, Active: 100},
+		Aggregate: DashboardAggregate{TotalSize: 1, CompletedBytes: 1, RemainingBytes: 0},
+		Active:    make([]DashboardActiveItem, 100),
+	}
+	for i := range d.Active {
+		d.Active[i] = DashboardActiveItem{
+			Name: strings.Repeat("\x01", 256), State: "downloading",
+			Progress: 0.5, DlSpeed: 1, UpSpeed: 1,
+		}
+	}
+	b := EncodeDashboardStatus(1, true, d) // must not panic
+	if len(b)+1 > MaxFrame {
+		t.Fatalf("drop-path frame %d bytes exceeds budget %d", len(b)+1, MaxFrame)
+	}
+	var resp struct {
+		Active []json.RawMessage `json:"active"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		t.Fatalf("drop-path frame not valid JSON: %v", err)
+	}
+	if len(resp.Active) > ActiveListWireCap {
+		t.Fatalf("encoder emitted %d entries, cap %d", len(resp.Active), ActiveListWireCap)
+	}
+}
+
+func TestVersionStringsCappedOnWire(t *testing.T) {
+	// A hostile/buggy backend version string must never push a frame
+	// past the budget: the ENCODER caps it (the adapter caps at its
+	// layer too; this pins the wire invariant independently).
+	huge := strings.Repeat("v", 4096)
+	b := EncodeDashboardStatus(1, true, DashboardData{
+		AppVersion: huge, WebAPIVersion: huge,
+		Counts: DashboardCounts{Total: math.MaxInt32, Active: math.MaxInt32},
+	})
+	if len(b)+1 > MaxFrame {
+		t.Fatalf("v1.3 ok frame %d bytes exceeds budget with huge versions", len(b)+1)
+	}
+	b = EncodeDashboardStatus(1, false, DashboardData{
+		LastKnown: &DashboardLastKnownData{AppVersion: huge, WebAPIVersion: huge,
+			Counts: DashboardCounts{Total: math.MaxInt32}},
+	})
+	if len(b)+1 > MaxFrame {
+		t.Fatalf("v1.3 degraded frame %d bytes exceeds budget with huge versions", len(b)+1)
+	}
+	b = EncodeStatus(1, true, StatusData{AppVersion: huge, WebAPIVersion: huge,
+		DlSpeed: math.MaxInt64, UpSpeed: math.MaxInt64, TorrentsTotal: math.MaxInt32})
+	if len(b)+1 > MaxFrame {
+		t.Fatalf("v1.0 status frame %d bytes exceeds budget with huge versions", len(b)+1)
+	}
 }
 
 func TestDashboardStatusAvailableAlongsideSubscription(t *testing.T) {
