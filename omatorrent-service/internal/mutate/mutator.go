@@ -127,10 +127,25 @@ func (o *Options) fill() {
 // Mutator orchestrates mutations. Submit is synchronous (bounded by
 // SubmitTimeout); Run drives reconciliation and result publication.
 type Mutator struct {
+	src  StateSource
+	log  *slog.Logger
+	opts Options
+
+	// backend is swapped only by SwitchBackend (guarded by mu, together
+	// with epoch); Submit captures it inside the registration critical
+	// section, so a mutation can never run against a backend it was not
+	// registered for (ADR-0008 §8).
+	//
+	// epoch is the backend generation pendings are stamped with; a
+	// pending left over from an older epoch settles as timeout
+	// (ambiguous), never as a confirmation against the wrong backend.
 	backend Backend
-	src     StateSource
-	log     *slog.Logger
-	opts    Options
+	epoch   uint64
+	// draining is set by BeginSwitch: new submissions are refused
+	// (CodeBusy) until CommitSwitch/AbortSwitch, so a backend switch
+	// can never interleave with a mutation registration (the
+	// validation-snapshot/registration race, security review F1).
+	draining bool
 
 	mu       sync.Mutex
 	nextMut  uint64
@@ -147,6 +162,7 @@ type pending struct {
 	url      string // recorded for ref-conflict comparison (add)
 	delFiles bool
 	deadline time.Time
+	epoch    uint64 // backend generation this mutation belongs to
 }
 
 // refRecord is the terminal record of one completed (or stage-1
@@ -199,6 +215,67 @@ func New(backend Backend, src StateSource, opts Options, log *slog.Logger) *Muta
 		inflight: map[string]*pending{},
 		subs:     map[chan Result]struct{}{},
 	}
+}
+
+// BeginSwitch starts a drain: refuses while any mutation is in flight
+// and rejects NEW submissions until the switch commits or aborts, so
+// validation-against-old-state + registration-on-new-backend can never
+// interleave (security review F1; ADR-0008 §8).
+func (m *Mutator) BeginSwitch() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.draining {
+		return fmt.Errorf("mutate: switch already in progress")
+	}
+	if len(m.inflight) > 0 {
+		return fmt.Errorf("mutate: refusing backend switch with %d mutations in flight", len(m.inflight))
+	}
+	m.draining = true
+	return nil
+}
+
+// CommitSwap finishes a begun switch: swaps the backend and bumps the
+// epoch. Callers must have passed BeginSwitch.
+func (m *Mutator) CommitSwap(b Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.draining = false
+	m.backend = b
+	m.epoch++
+}
+
+// AbortSwitch releases the drain without swapping (rollback path).
+func (m *Mutator) AbortSwitch() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.draining = false
+}
+
+// SwitchBackend is the one-shot variant (tests): refuse-while-in-flight
+// plus swap, atomically under the mutation lock.
+func (m *Mutator) SwitchBackend(b Backend) error {
+	if err := m.BeginSwitch(); err != nil {
+		return err
+	}
+	m.CommitSwap(b)
+	return nil
+}
+
+// ReconcileForTest drives one reconcile pass synchronously.
+func (m *Mutator) ReconcileForTest() { m.reconcile() }
+
+// InFlight reports the number of in-flight mutations.
+func (m *Mutator) InFlight() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.inflight)
+}
+
+// Epoch returns the current backend epoch.
+func (m *Mutator) Epoch() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.epoch
 }
 
 // btihRe validates the btih payload of a magnet xt parameter. NOTE:
@@ -307,6 +384,13 @@ func (m *Mutator) Submit(req Request) Stage1 {
 		hash = wantHash
 	}
 	m.mu.Lock()
+	if m.draining {
+		// A backend switch is draining registrations: the committed
+		// state this request validated against may be about to be
+		// replaced — refuse rather than risk cross-backend execution.
+		m.mu.Unlock()
+		return Stage1{Outcome: CodeBusy}
+	}
 	if s1, ok := m.lookupRefLocked(req); ok {
 		m.mu.Unlock()
 		return s1
@@ -317,6 +401,7 @@ func (m *Mutator) Submit(req Request) Stage1 {
 	}
 	m.nextMut++
 	mut := m.nextMut
+	backend, epoch := m.backend, m.epoch
 	m.inflight[req.Ref] = &pending{
 		mutation: mut,
 		action:   req.Action,
@@ -324,13 +409,16 @@ func (m *Mutator) Submit(req Request) Stage1 {
 		url:      req.URL,
 		delFiles: req.DeleteFiles,
 		deadline: time.Now().Add(m.opts.ReconcileWindow),
+		epoch:    epoch,
 	}
 	m.mu.Unlock()
 
-	// Submit to the backend with a daemon-owned timeout.
+	// Submit to the backend with a daemon-owned timeout. The backend
+	// captured above is the one this mutation was registered under; a
+	// concurrent SwitchBackend refuses while we are in flight.
 	ctx, cancel := context.WithTimeout(context.Background(), m.opts.SubmitTimeout)
 	defer cancel()
-	err := m.submit(ctx, req, st.WebAPIVersion)
+	err := m.submitBackend(ctx, backend, req, st.WebAPIVersion)
 
 	if err != nil {
 		m.mu.Lock()
@@ -355,21 +443,21 @@ func (m *Mutator) Submit(req Request) Stage1 {
 // probes before mutations are possible); a present-but-unparseable
 // version falls back to the LEGACY endpoints — both wrong guesses fail
 // visibly (404 → backend_rejected), never silently.
-func (m *Mutator) submit(ctx context.Context, req Request, webapiVersion string) error {
+func (m *Mutator) submitBackend(ctx context.Context, backend Backend, req Request, webapiVersion string) error {
 	modern := webapiVersion == "" || webapiAtLeast(webapiVersion, 2, 11, 0)
 	switch req.Action {
 	case Pause:
 		if modern {
-			return m.backend.StopTorrent(ctx, req.Hash)
+			return backend.StopTorrent(ctx, req.Hash)
 		}
-		return m.backend.PauseTorrent(ctx, req.Hash)
+		return backend.PauseTorrent(ctx, req.Hash)
 	case Resume:
 		if modern {
-			return m.backend.StartTorrent(ctx, req.Hash)
+			return backend.StartTorrent(ctx, req.Hash)
 		}
-		return m.backend.ResumeTorrent(ctx, req.Hash)
+		return backend.ResumeTorrent(ctx, req.Hash)
 	case Add:
-		echo, err := m.backend.AddMagnet(ctx, req.URL)
+		echo, err := backend.AddMagnet(ctx, req.URL)
 		if err != nil {
 			return err
 		}
@@ -383,7 +471,7 @@ func (m *Mutator) submit(ctx context.Context, req Request, webapiVersion string)
 		}
 		return nil
 	case Remove:
-		return m.backend.DeleteTorrent(ctx, req.Hash, req.DeleteFiles)
+		return backend.DeleteTorrent(ctx, req.Hash, req.DeleteFiles)
 	}
 	return fmt.Errorf("unknown action")
 }
@@ -429,6 +517,17 @@ func (m *Mutator) reconcile() {
 	m.mu.Lock()
 	var finished []Result
 	for ref, p := range m.inflight {
+		if p.epoch != m.epoch {
+			// Orphaned by a backend switch (defense in depth — SwitchBackend
+			// refuses while in flight, but settle safely if it ever happens):
+			// the outcome is ambiguous, never confirmed against the new
+			// backend (ADR-0008 §8).
+			finished = append(finished, Result{Mutation: p.mutation, Action: p.action, Hash: p.hash, Status: StatusTimeout})
+			m.appendRingLocked(refRecord{ref: ref, action: p.action, hash: p.hash,
+				url: p.url, delFiles: p.delFiles, status: StatusTimeout, mutation: p.mutation})
+			delete(m.inflight, ref)
+			continue
+		}
 		if status, done := checkIntent(p, st); done {
 			finished = append(finished, Result{Mutation: p.mutation, Action: p.action, Hash: p.hash, Status: status})
 			m.appendRingLocked(refRecord{ref: ref, action: p.action, hash: p.hash,

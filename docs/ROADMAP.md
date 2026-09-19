@@ -4,6 +4,19 @@ Status: DRAFT. Version numbers are planning anchors, not promises.
 Dependencies and exit criteria use the evidence rules from
 `docs/TESTING.md` (omatorrent-verification skill).
 
+## Product scope [DECISION 2026-09-19 — binding]
+
+OmaTorrent stays **strictly torrent-focused**:
+
+- **VPN monitoring is removed from OmaTorrent's scope entirely.** VPN
+  state/monitoring is owned by another existing Omarchy plugin and must
+  not be duplicated here.
+- General-purpose NAS administration and general network monitoring are
+  out of scope.
+- One configured qBittorrent backend at a time before 1.0 (no
+  multi-instance management).
+- Transmission support is out of scope before 1.0.
+
 ## Phases (0.1 → 1.0)
 
 | Ver | Theme | Depends on | Exit criteria (evidence) |
@@ -13,11 +26,20 @@ Dependencies and exit criteria use the evidence rules from
 | 0.3 | Essential torrent actions (pause/resume/add/remove, explicit delete-files, staged confirmation) | 0.2 | mutation contract tests; confirmation flow for removal; degraded states truthful |
 | 0.4 | Dashboard | 0.2 | dashboard renders health/stats from real daemon data; lifecycle open/close stable |
 | 0.5 | Remote qBittorrent + security hardening | 0.3 | TLS + credential handling security-reviewed; remote backend integration test |
-| 0.6 | VPN monitoring (defense in depth) | 0.5 | VPN status claims provable; security review of the safety model |
-| 0.7 | Storage/NAS safety | 0.4 | storage monitor with real sources; destructive-path protections tested |
+| 0.6 | Advanced torrent controls (speed limits, force start, recheck, queue priority, categories/tags, possibly reannounce; other torrent-specific controls after research) | 0.5 | controls verified against live backend; ADR-0006 mutation safety extended without regression |
+| 0.7 | Torrent files / content management (file tree, per-file progress, file priorities, content selection, folder/file display, torrent-content storage information) | 0.6 | file-tree truthfulness + per-file priority changes verified; destructive-path protections tested |
 | 0.8 | Metrics/history/diagnostics | 0.4 | SQLite schema + migrations tested; data derived from real sources |
 | 0.9 | CI, update/rollback, hardening | all | CI green on tagged runs; upgrade + rollback tested; release gates pass |
 | 1.0 | Release | 0.9 | full release gate run (omatorrent-release skill) READY verdict |
+
+## Phase 0.5 — Remote qBittorrent + security hardening (IN PROGRESS, issue #9)
+
+Connect securely to a qBittorrent WebUI endpoint that is not necessarily
+localhost (LAN server, NAS/container, HTTPS reverse proxy, remote host
+over an existing secure path). Strictly torrent-focused: no VPN client,
+no proxy/SSH-tunnel/Tailscale manager, no NAS admin, no network monitor,
+no multi-instance management, no Transmission. Local experience
+unchanged (localhost bypass keeps working without credentials).
 
 ## Phase 0.4 — Dashboard (MERGED 2026-09-19 via PR #8 @ df373af)
 

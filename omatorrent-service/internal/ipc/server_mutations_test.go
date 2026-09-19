@@ -60,7 +60,7 @@ func startServerRaw(t *testing.T, h Handler, subs Subscriptions, muts Mutations)
 	dir := t.TempDir()
 	os.Chmod(dir, 0o700)
 	path := filepath.Join(dir, "service.sock")
-	srv, err := New(path, h, subs, muts, nil)
+	srv, err := New(path, h, subs, muts, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

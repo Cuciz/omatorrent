@@ -2,7 +2,8 @@
 
 Status: v1 (ADR-0004) + v1.1 extension (ADR-0005, read-only torrent
 state) + v1.2 extension (ADR-0006, staged mutations) + v1.3 extension
-(ADR-0007, dashboard aggregates). No secrets.
+(ADR-0007, dashboard aggregates) + v1.4 extension (ADR-0008, connection
+management). No secrets in any response.
 Encoding: newline-delimited JSON (NDJSON) — see ADR-0004 for the choice
 vs JSON-RPC/binary framing.
 
@@ -361,6 +362,136 @@ fixtures: `contracts/ipc/v1/dashboard-status.txt`,
 `response-dashboard-status-degraded.txt`,
 `response-dashboard-status-never-synced.txt`.
 
+## v1.4 extension: connection management (ADR-0008)
+
+Read-mostly surface for the connection settings UI. Profile metadata and
+live connection status are cache-served; `connection.test` is the second
+(and last) IPC message that performs bounded inline network work (≤ 8 s,
+temporary client, no state change — the precedent is the v1.2 stage-1
+mutation submission); `connection.configure` is the only message that
+switches the backend epoch. No response ever contains a secret; the
+optional request password crosses client→daemon once per user action
+inside the 0600-socket trust boundary (ADR-0004/0008) and is never
+echoed, logged or persisted.
+
+### connection.status (exact two keys, like health)
+
+```json
+{"type":"connection.status","id":10}
+```
+Response (exact key set):
+```json
+{"type":"connection.status","protocol":1,"id":10,"configured":true,
+ "mode":"local","url":"http://127.0.0.1:8080","host":"127.0.0.1:8080","transport":"http","insecure":false,
+ "username":"","has_secret":false,"tls_mode":"system",
+ "status":"connected","detail":"","epoch":0}
+```
+(`pin` — 64 hex — is additionally present iff `tls_mode` is `pin`;
+`epoch` starts at 0 on daemon start and increments on every
+configured switch. `connection.status` always carries `detail`
+(possibly empty); the `connection.test` response omits `detail` when
+empty.)
+- `mode` — `local` (loopback URL) or `remote` (derived, never stored);
+  `url` — the validated origin (non-secret; the settings form prefills
+  it — like `username`, status surfaces display only `host`).
+- `host` — display-safe label `host[:port][/path]`, capped at 128 runes;
+  never a userinfo, secret or full URL echo.
+- `transport` — `http` | `https`; `insecure` — the FACTUAL transport
+  state: true iff the active transport is non-loopback plain HTTP,
+  independent of consent (`allow_insecure_http` is the persisted
+  permission; a remote-HTTP profile can only be active WITH it, so
+  `insecure` can never launder reality — remote HTTP in use with
+  `insecure:false` is unreachable).
+- `username` — non-secret (the settings form prefills it; status
+  surfaces should display only `host`); `has_secret` — stored
+  credential exists (bool, never the value).
+- `status` — `connecting` | `connected` | `unreachable` |
+  `auth_required` | `auth_failed` | `banned` | `tls_untrusted` |
+  `tls_hostname` | `secrets_unavailable` | `insecure_http` |
+  `invalid_configuration` | `backend_error`; `detail` — fixed short
+  string, never reflects request payloads.
+- `epoch` — backend epoch (monotonic per daemon process; resets on
+  daemon restart).
+
+### connection.test (one-shot probe; NO state change, NO torrent mutations)
+
+```json
+{"type":"connection.test","id":11,"url":"https://qbittorrent.home.arpa",
+ "username":"clement","password":"…","tls_mode":"system"}
+```
+Key rules (schema-level): `url` (required, ≤ 2048 bytes, any scheme
+shape — semantic validation is the handler's, answering
+`invalid_configuration`); `username` (optional, ≤ 64 runes);
+`password` (optional, 1–256 bytes) **xor** `use_stored_password`
+(boolean, optional — both present is `invalid_message`); `tls_mode`
+(required, `system` | `pin`; the file-only `ca` mode is not settable
+over IPC); `pin` (optional, exactly 64 lowercase hex, semantically
+required with `tls_mode:"pin"`); `allow_insecure_http` (optional
+boolean, absent = false). With neither `password` nor
+`use_stored_password` the probe is anonymous (no login; the
+localhost-bypass path).
+
+Response ok (exact key set; version fields iff ok):
+```json
+{"type":"connection.test","protocol":1,"id":11,"result":"ok","status":"connected",
+ "host":"qbittorrent.home.arpa","transport":"https",
+ "app_version":"v5.2.3","webapi_version":"2.15.1"}
+```
+Response failed:
+```json
+{"type":"connection.test","protocol":1,"id":11,"result":"failed","status":"tls_untrusted",
+ "host":"qbittorrent.home.arpa","transport":"https","offered_fingerprint":"<64 hex>","detail":""}
+```
+`offered_fingerprint` is present iff a TLS certificate was presented
+and rejected — it is the SHA-256 of the offered leaf certificate and
+enables the explicit trust/pin flow (the certificate bytes themselves
+never cross IPC). The test performs at most one login and two version
+probes with a discarded cookie jar; a failed test never alters the
+active backend, the stored profile or the stored secret.
+
+### connection.configure (activate a profile — switches the epoch)
+
+```json
+{"type":"connection.configure","id":12,"url":"https://qbittorrent.home.arpa",
+ "username":"clement","secret_action":"replace","password":"…","tls_mode":"pin","pin":"<64 hex>"}
+```
+Same key rules as `connection.test`, plus required `secret_action`:
+`keep` (stored secret unchanged), `replace` (requires `password`) or
+`delete` (stored secret removed) — an empty or abandoned form can
+never erase or expose a secret. Activation order: validate URL/policy →
+secret op via the provider → atomic `connection.json` write → backend
+epoch switch (refused with `mutations_pending` while any mutation is
+in flight) → subscribers receive the old torrents as removals, then a
+fresh full sync of the new backend.
+
+Accepted:
+```json
+{"type":"connection.configured","protocol":1,"id":12,"epoch":2,
+ "mode":"remote","host":"qbittorrent.home.arpa","transport":"https"}
+```
+Rejected (connection stays open; no payload echoed):
+```json
+{"type":"connection.rejected","protocol":1,"id":12,"code":"insecure_http"}
+```
+| Code | Condition |
+|---|---|
+| invalid_url | URL/pin/tls-mode combination failed semantic validation |
+| insecure_http | non-loopback HTTP without the explicit `allow_insecure_http` acknowledgement |
+| pin_unknown | pin fingerprint has no captured certificate (re-test first) |
+| secrets_unavailable | secret provider failed (missing/locked) on replace/delete |
+| mutations_pending | a mutation is in flight; retry after it settles |
+| storage_error | the atomic config write failed |
+
+Contract fixtures: `contracts/ipc/v1/connection-status.txt`,
+`connection-test.txt`, `connection-configure.txt`.
+
+Client rules: same lockstep discipline (one request in flight,
+id-matched); after a `connection.configured` frame, state clients
+should expect the next snapshot to be a full rebuild (the daemon
+publishes removals + fresh full sync) and MUST drop any cached torrent
+rows on `torrent.snapshot.begin` as usual. The password field must be
+cleared from QML immediately after the frame is written.
+
 ## Errors and resource limits
 
 Response shape (then connection closes):
@@ -374,7 +505,7 @@ Response shape (then connection closes):
 | message_too_large | Frame cannot fit in 4096 bytes including LF |
 | handshake_required | A valid message other than hello arrives first |
 | version_mismatch | First hello has an integer protocol other than 1 |
-| unsupported_message | After hello, a valid message type other than health/system.status/dashboard.status/torrent.subscribe/torrent.pause/torrent.resume/torrent.add/torrent.remove, including another hello; also a second torrent.subscribe on an already-subscribed connection (error only, connection stays open) |
+| unsupported_message | After hello, a valid message type other than health/system.status/dashboard.status/torrent.subscribe/torrent.pause/torrent.resume/torrent.add/torrent.remove/connection.status/connection.test/connection.configure, including another hello; also a second torrent.subscribe on an already-subscribed connection (error only, connection stays open) |
 
 Unknown message types use the type-only shape; adding other fields is
 invalid_message. A hello never carries an id; health/system.status always
@@ -387,10 +518,13 @@ response.
 At most 16 active clients; excess connections close without a response.
 Handshake deadline: 5 seconds. Following frames: 30-second idle read
 deadline; responses have a 5-second write deadline. Responses are always
-produced from cached state, so they arrive promptly — the one exception
-is the v1.2 mutation stage-1 response, which performs one bounded
-(≤ 5 s) backend submission inline under the lockstep discipline; the
-degraded `qbittorrent:"unavailable"` shape is the answer whenever the
+produced from cached state, so they arrive promptly — the exceptions
+are the v1.2 mutation stage-1 response (one bounded ≤ 5 s backend
+submission inline), the v1.4 `connection.test` response (bounded
+≤ 8 s one-shot probe) and `connection.configure` (bounded secret op +
+atomic write; the backend switch itself is asynchronous) — all under
+the lockstep discipline. The degraded `qbittorrent:"unavailable"`
+shape is the answer whenever the
 cache holds no live backend state (startup window or backend down).
 Every client is closed on shutdown, including clients stalled halfway
 through a frame.

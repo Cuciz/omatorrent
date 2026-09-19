@@ -1,0 +1,1 @@
+{"type":"connection.configure","id":12,"url":"https://qbittorrent.home.arpa","username":"clement","secret_action":"replace","password":"hunter2","tls_mode":"pin","pin":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}

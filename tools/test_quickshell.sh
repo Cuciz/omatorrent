@@ -53,6 +53,15 @@ ShellRoot {
   property var dashCounts: null
   property bool dashModelDone: false
 
+  // ---- v1.4 connection stages (read-mostly; the configure stage
+  //      re-activates the SAME local backend — an idempotent epoch
+  //      switch, no data change, no mutations, no secrets).
+  property int connStage: 0
+  property int connPass: 0
+  property int connTotal: 4
+  property string connUrl: ""
+  property int connEpoch: -1
+
   // ---- v1.2 mutation stages (all against a disposable torrent).
   property string ghostHash: ""   // random 40-hex: never resolvable, no data
   property int mutStage: 0        // 0=waiting for snapshot; advance via mutStep()
@@ -92,6 +101,97 @@ ShellRoot {
     pendingId = nextId++
     pendingSince = Date.now()
     send({ type: "torrent.subscribe", id: pendingId })
+  }
+
+  function requestConn(action, extra) {
+    if (pendingKind !== "") return false
+    pendingKind = action
+    pendingId = nextId++
+    pendingSince = Date.now()
+    const msg = Object.assign({ type: action, id: pendingId }, extra || {})
+    send(msg)
+    return true
+  }
+
+  function connStageDone(ok, label) {
+    if (!ok) {
+      print("OTQS-FAIL connection stage " + connStage + " (" + label + ")")
+      Qt.quit()
+      return
+    }
+    print("OTQS-CONN stage " + connStage + " ok (" + label + ")")
+    connPass++
+    connStage++
+    connStep()
+  }
+
+  // Stage 0: status shape + capture the active URL; 1: anonymous test
+  // against it (local bypass — no credentials cross); 2: configure
+  // keep on the same URL (idempotent re-activation); 3: fresh status
+  // shows the epoch advanced.
+  function connStep() {
+    if (pendingKind !== "") return
+    switch (connStage) {
+      case 0:
+        requestConn("connection.status")
+        break
+      case 1:
+        if (connUrl === "") { connStageDone(false, "no url captured"); return }
+        requestConn("connection.test", { url: connUrl, tls_mode: "system" })
+        break
+      case 2:
+        requestConn("connection.configure", { url: connUrl, secret_action: "keep", tls_mode: "system" })
+        break
+      case 3:
+        requestConn("connection.status")
+        break
+      default:
+        maybeDone()
+    }
+  }
+
+  function handleConn(kind, msg) {
+    switch (kind) {
+      case "connection.status":
+        if (connStage === 0) {
+          const keys = Object.keys(msg).sort().join(",")
+          const want = "configured,detail,epoch,has_secret,host,id,insecure,mode,protocol,status,transport,tls_mode,type,url,username".split(",").sort().join(",")
+          if (keys !== want) { connStageDone(false, "status key set: " + keys); return }
+          if (msg.configured !== true) { connStageDone(false, "not configured"); return }
+          connUrl = msg.url
+          connEpoch = msg.epoch
+          connStageDone(true, "status " + msg.status + " mode=" + msg.mode)
+        } else {
+          if (typeof msg.epoch !== "number" || msg.epoch <= connEpoch) {
+            connStageDone(false, "epoch did not advance: " + msg.epoch + " <= " + connEpoch)
+            return
+          }
+          connStageDone(true, "epoch " + connEpoch + " -> " + msg.epoch)
+        }
+        break
+      case "connection.test":
+        if (msg.result !== "ok" || msg.status !== "connected") {
+          connStageDone(false, "test = " + JSON.stringify(msg))
+          return
+        }
+        if (typeof msg.app_version !== "string" || typeof msg.webapi_version !== "string") {
+          connStageDone(false, "test version fields missing")
+          return
+        }
+        connStageDone(true, "test ok " + msg.app_version + "/" + msg.webapi_version)
+        break
+      case "connection.configure":
+        if (msg.type === "connection.configured") {
+          if (typeof msg.epoch !== "number" || msg.epoch <= connEpoch) {
+            connStageDone(false, "configured epoch " + msg.epoch + " <= " + connEpoch)
+            return
+          }
+          connStageDone(true, "configured epoch " + msg.epoch)
+        } else {
+          connStageDone(false, "rejected " + (msg.code || JSON.stringify(msg)))
+        }
+        break
+    }
   }
 
   function requestMutation(action, extra, refOverride) {
@@ -156,7 +256,11 @@ ShellRoot {
         if (requestMutation("torrent.pause", { hash: "ffffffffffffffffffffffffffffffffffffffff" })) mutWait = "!stale_torrent"
         break
       default:
-        maybeDone()
+        // All mutation stages done -> run the v1.4 connection stages
+        // (same lockstep connection; strictly after mutations so the
+        // two sequences never interleave).
+        if (connStage === 0) connStep()
+        else maybeDone()
     }
   }
 
@@ -481,6 +585,17 @@ ShellRoot {
         }
         break
       case "torrent.delta":
+      case "connection.status":
+      case "connection.test":
+      case "connection.configured":
+      case "connection.rejected":
+        if (typeof msg.id === "number" && msg.id === pendingId) {
+          const kind = pendingKind
+          pendingId = -1
+          pendingKind = ""
+          handleConn(kind, msg)
+        }
+        break
       case "error":
         break
     }
@@ -551,7 +666,7 @@ ShellRoot {
   }
 
   function maybeDone() {
-    if (matched >= 2 && dashOk >= 1 && dashModelDone && snapshotBegin === 1 && snapshotEnd === 1 && renameTestDone && orderingTestDone && mutPass >= mutTotal) {
+    if (matched >= 2 && dashOk >= 1 && dashModelDone && snapshotBegin === 1 && snapshotEnd === 1 && renameTestDone && orderingTestDone && mutPass >= mutTotal && connPass >= connTotal) {
       print("OTQS-DONE")
       Qt.quit()
     }

@@ -49,6 +49,7 @@ type Server struct {
 	handler    Handler
 	subs       Subscriptions
 	muts       Mutations
+	conns      Connections
 	log        *slog.Logger
 
 	ln        net.Listener
@@ -166,9 +167,9 @@ func ensureAppDir(dir string) error {
 }
 
 // New validates the socket path and prepares the server. Call Serve to
-// accept connections. subs/muts may be nil to disable the corresponding
-// v1.x extension surfaces.
-func New(socketPath string, handler Handler, subs Subscriptions, muts Mutations, log *slog.Logger) (*Server, error) {
+// accept connections. subs/muts/conns may be nil to disable the
+// corresponding v1.x extension surfaces.
+func New(socketPath string, handler Handler, subs Subscriptions, muts Mutations, conns Connections, log *slog.Logger) (*Server, error) {
 	if handler == nil {
 		return nil, fmt.Errorf("ipc: nil handler")
 	}
@@ -180,6 +181,7 @@ func New(socketPath string, handler Handler, subs Subscriptions, muts Mutations,
 		handler:    handler,
 		subs:       subs,
 		muts:       muts,
+		conns:      conns,
 		log:        log,
 		clients:    make(map[net.Conn]struct{}),
 		mutConns:   make(map[*connIO]struct{}),
@@ -549,6 +551,44 @@ func (s *Server) handle(conn net.Conn) {
 			// v1.3 (ADR-0007): aggregates served from committed state.
 			data, ok := s.handler.Dashboard()
 			c.send(EncodeDashboardStatus(req.ID, ok, data))
+		case "connection.status":
+			// v1.4 (ADR-0008): cache-served connection status.
+			if s.conns == nil {
+				c.send(EncodeError(failCode(errUnsupported)))
+				return
+			}
+			c.send(EncodeConnectionStatus(req.ID, s.conns.ConnectionStatus()))
+		case "connection.test", "connection.configure":
+			// v1.4 (ADR-0008): bounded inline work under the lockstep
+			// discipline (Manager budget 8 s — the v1.2 stage-1
+			// precedent). The password is transit-only: converted to
+			// bytes for the handler and wiped immediately after.
+			if s.conns == nil {
+				c.send(EncodeError(failCode(errUnsupported)))
+				return
+			}
+			pw := []byte(req.Password)
+			req.Password = ""
+			tr := ConnectionTestRequest{
+				URL: req.URL, Username: req.Username, Password: pw,
+				UseStoredPassword: req.UseStoredPassword, TLSMode: req.TLSMode,
+				Pin: req.Pin, AllowInsecureHTTP: req.AllowInsecureHTTP,
+			}
+			if req.Type == "connection.test" {
+				d := s.conns.ConnectionTest(tr)
+				wipeBytes(pw)
+				c.send(EncodeConnectionTest(req.ID, d))
+			} else {
+				d := s.conns.ConnectionConfigure(ConnectionConfigureRequest{
+					ConnectionTestRequest: tr, SecretAction: req.SecretAction,
+				})
+				wipeBytes(pw)
+				if d.OK {
+					c.send(EncodeConnectionConfigured(req.ID, d))
+				} else {
+					c.send(EncodeConnectionRejected(req.ID, d.Rejection))
+				}
+			}
 		case "torrent.subscribe":
 			if s.subs == nil {
 				c.send(EncodeError(failCode(errUnsupported)))
@@ -677,6 +717,14 @@ func sortItems(items []TorrentItem) {
 		}
 		return items[i].Hash < items[j].Hash
 	})
+}
+
+// wipeBytes zeroes a transit secret buffer (best effort; the parsed
+// string copy is unreachable after the handler returns — ADR-0008).
+func wipeBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
 
 // fail sends the mapped error frame directly (pre-queue, handshake

@@ -1,0 +1,1 @@
+{"type":"connection.test","id":11,"url":"https://qbittorrent.home.arpa","username":"clement","tls_mode":"system"}

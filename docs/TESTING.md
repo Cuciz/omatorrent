@@ -1,8 +1,8 @@
 # OmaTorrent — Testing & Evidence
 
-Status: PHASE 0 — suites exist and were executed (see
-docs/agent/PHASE0.md for the recorded run). Evidence rules used by
-/ot-verify, the omatorrent-verification skill, and the qa-release agent.
+Status: PHASE 0.5 — suites exist and were executed (evidence in
+docs/agent/PHASE0..PHASE05.md). Evidence rules used by /ot-verify, the
+omatorrent-verification skill, and the qa-release agent.
 
 ## States (project vocabulary)
 
@@ -93,6 +93,37 @@ evidence; "code looks right" is never sufficient.
   and socket-peer counts flat (destroy-on-close overlay), Escape and
   click-outside close, reopen after shell restart and after daemon
   restart recovery; theme light/dark observed via `omarchy theme set`.
+
+- **Remote connection (0.5)** — `internal/connection`: URL validation
+  matrix, profile store discipline (permissions/symlinks/atomicity/
+  malformed/oversized, LoadActive fallback), the degraded-state matrix
+  A–O against httptest fixtures (local normal; remote HTTPS via the
+  full TOFU pin flow; DNS unreachable; TCP refused; auth_required;
+  bad password incl. sticky frugality; session expiry re-auth success
+  and failure; untrusted certificate; hostname mismatch; insecure-HTTP
+  policy; malformed URLs; old WebAPI still syncs — no hard gate, by
+  design; A→B backend switch incl. mutations_pending guard and rid
+  reset; daemon restart with a remote profile), configure secret
+  intents (keep/replace/delete, secrets_unavailable). Syncer switch/
+  sticky suites in `internal/state/syncer_switch_test.go`; mutator
+  epoch-guard suites in `internal/mutate/mutator_switch_test.go`;
+  adapter remote suites (version-adaptive login both eras, redirects
+  refused with observable targets, TLS system/CA/pin incl. mismatch
+  and hostname classes with fingerprint extraction, 202 add, zeroed
+  fetch-per-login, logout, protocol-mismatch classification,
+  path-prefix joins) in `internal/qbittorrent/client_remote_test.go`;
+  v1.4 wire schemas/anti-reflection/fixtures in
+  `internal/ipc/server_connection_test.go`. Live evidence (disposable
+  qbittorrent-nox fixture on the LAN IP with self-signed HTTPS, temp
+  password, zero torrents, killed after): insecure_http refusal and
+  acknowledged activation, real Secret Service store/lookup/clear,
+  tls_untrusted with fingerprint cross-checked against openssl, pin
+  trust flow, auth_required/auth_failed sticky ladder (3 attempts, no
+  ban), certificate-rotation pin mismatch, restore-to-local — recorded
+  in docs/agent/PHASE05.md. `tools/test_quickshell.sh` additionally
+  runs four v1.4 connection stages (status key set, anonymous test
+  against the live backend, idempotent configure with epoch advance,
+  epoch verification) after the mutation stages.
 
 ## done_when examples (the standard)
 

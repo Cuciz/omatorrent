@@ -11,6 +11,18 @@ this file records the decided direction and the open questions.
 - The development harness plugin (`omatorrent-dev-harness`) is NEVER
   packaged or published as the product — separate identities.
 
+## Runtime dependencies (Phase 0.5)
+
+- `libsecret` (provides `secret-tool`) — REQUIRED for credential
+  storage (ADR-0009): gnome-keyring is a hard `omarchy` package
+  dependency and its default keyring is passwordless by Omarchy
+  design, so the daemon can store/retrieve credentials from session
+  start. Absence/locked keyring degrades truthfully
+  (`secrets_unavailable`) — never a plaintext fallback. Packaging must
+  declare this dependency explicitly.
+- Everything else unchanged (Go static binary + QML plugin; no new Go
+  module dependencies — the daemon remains stdlib-only).
+
 ## Release audit targets (from docs/SECURITY.md)
 
 - What install/update scripts execute, with which privileges.

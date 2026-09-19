@@ -45,6 +45,16 @@ type Request struct {
 	URL         string
 	DeleteFiles bool
 	Ref         string
+
+	// v1.4 connection fields (ADR-0008). Password is transit-only: it
+	// is never echoed, never logged, and cleared by the handler.
+	Username          string
+	Password          string
+	UseStoredPassword bool
+	TLSMode           string
+	Pin               string
+	AllowInsecureHTTP bool
+	SecretAction      string
 }
 
 // Response frames. Field order matches docs/IPC.md (encoding/json emits
@@ -605,6 +615,7 @@ var errInvalid = sentinelErr{CodeInvalidMessage}
 var (
 	hashRe = regexp.MustCompile(`^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$`)
 	refRe  = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+	pinRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 func validHash(h string) bool { return hashRe.MatchString(h) }
@@ -657,6 +668,11 @@ func parseFrame(frame []byte) (Request, error) {
 		hasID                bool
 		hasHash, hasURL      bool
 		hasDelete, hasRef    bool
+		hasUsername, hasPass bool
+		hasUseStored         bool
+		hasTLSMode, hasPin   bool
+		hasAllowHTTP         bool
+		hasSecretAction      bool
 	)
 	seen := map[string]bool{}
 	for dec.More() {
@@ -723,8 +739,11 @@ func parseFrame(frame []byte) (Request, error) {
 			}
 			req.Hash, hasHash = s, true
 		case "url":
+			// Bounded at decode; the per-type rules below decide the
+			// shape (magnet: for torrent.add, any bounded URL string
+			// for the v1.4 connection types).
 			s, ok := decodeStr()
-			if !ok || len(s) == 0 || len(s) > 2048 || !strings.HasPrefix(s, "magnet:") {
+			if !ok || len(s) == 0 || len(s) > 2048 {
 				return Request{}, errInvalid
 			}
 			req.URL, hasURL = s, true
@@ -742,6 +761,48 @@ func parseFrame(frame []byte) (Request, error) {
 				return Request{}, errInvalid
 			}
 			req.Ref, hasRef = s, true
+		case "username":
+			s, ok := decodeStr()
+			if !ok || len(s) > 64 {
+				return Request{}, errInvalid
+			}
+			req.Username, hasUsername = s, true
+		case "password":
+			// Transit-only secret (ADR-0008 §9): bounded, never echoed,
+			// never logged; the handler wipes its copy after use.
+			s, ok := decodeStr()
+			if !ok || len(s) == 0 || len(s) > 256 {
+				return Request{}, errInvalid
+			}
+			req.Password, hasPass = s, true
+		case "use_stored_password":
+			if !bytes.Equal(raw, []byte("true")) && !bytes.Equal(raw, []byte("false")) {
+				return Request{}, errInvalid
+			}
+			req.UseStoredPassword, hasUseStored = string(raw) == "true", true
+		case "tls_mode":
+			s, ok := decodeStr()
+			if !ok || (s != "system" && s != "pin") { // `ca` is file-only (ADR-0008 §4)
+				return Request{}, errInvalid
+			}
+			req.TLSMode, hasTLSMode = s, true
+		case "pin":
+			s, ok := decodeStr()
+			if !ok || !pinRe.MatchString(s) {
+				return Request{}, errInvalid
+			}
+			req.Pin, hasPin = s, true
+		case "allow_insecure_http":
+			if !bytes.Equal(raw, []byte("true")) && !bytes.Equal(raw, []byte("false")) {
+				return Request{}, errInvalid
+			}
+			req.AllowInsecureHTTP, hasAllowHTTP = string(raw) == "true", true
+		case "secret_action":
+			s, ok := decodeStr()
+			if !ok || (s != "keep" && s != "replace" && s != "delete") {
+				return Request{}, errInvalid
+			}
+			req.SecretAction, hasSecretAction = s, true
 		default:
 			return Request{}, errInvalid // unknown field
 		}
@@ -762,31 +823,91 @@ func parseFrame(frame []byte) (Request, error) {
 	// too — a smuggled hash/url/delete_files/ref on health/status/
 	// subscribe is invalid_message exactly as any other unknown field
 	// was before v1.2 existed (review finding: grammar strictness).
+	// v1.4 connection fields must not smuggle onto pre-v1.4 types.
+	connFields := hasUsername || hasPass || hasUseStored || hasTLSMode || hasPin || hasAllowHTTP || hasSecretAction
+
 	switch req.Type {
 	case "hello":
-		if !hasProtocol || hasID || hasHash || hasURL || hasDelete || hasRef {
+		if !hasProtocol || hasID || hasHash || hasURL || hasDelete || hasRef || connFields {
 			return Request{}, errInvalid
 		}
-	case "health", "system.status", "torrent.subscribe", "dashboard.status":
-		if !hasID || hasProtocol || hasHash || hasURL || hasDelete || hasRef {
+	case "health", "system.status", "torrent.subscribe", "dashboard.status", "connection.status":
+		if !hasID || hasProtocol || hasHash || hasURL || hasDelete || hasRef || connFields {
 			return Request{}, errInvalid
 		}
 	case "torrent.pause", "torrent.resume":
-		if !hasID || hasProtocol || !hasHash || !hasRef || hasURL || hasDelete {
+		if !hasID || hasProtocol || !hasHash || !hasRef || hasURL || hasDelete || connFields {
 			return Request{}, errInvalid
 		}
 	case "torrent.add":
-		if !hasID || hasProtocol || !hasURL || !hasRef || hasHash || hasDelete {
+		if !hasID || hasProtocol || !hasURL || !hasRef || hasHash || hasDelete || connFields {
+			return Request{}, errInvalid
+		}
+		if !strings.HasPrefix(req.URL, "magnet:") {
 			return Request{}, errInvalid
 		}
 	case "torrent.remove":
-		if !hasID || hasProtocol || !hasHash || !hasRef || !hasDelete || hasURL {
+		if !hasID || hasProtocol || !hasHash || !hasRef || !hasDelete || hasURL || connFields {
 			return Request{}, errInvalid
 		}
+	case "connection.test", "connection.configure":
+		if !hasID || hasProtocol || hasHash || hasDelete || hasRef {
+			return Request{}, errInvalid
+		}
+		if !hasURL || !hasTLSMode {
+			return Request{}, errInvalid
+		}
+		// torrent.add's url must be a magnet; the connection types take
+		// arbitrary bounded URL strings (semantic validation is the
+		// connection manager's — parse-time only bounds shape/length).
+		if !validConnURL(req.URL) {
+			return Request{}, errInvalid
+		}
+		if hasPass && hasUseStored {
+			return Request{}, errInvalid // explicit secret source, never both
+		}
+		if req.TLSMode == "pin" && !hasPin {
+			return Request{}, errInvalid
+		}
+		if req.TLSMode != "pin" && hasPin {
+			return Request{}, errInvalid
+		}
+		if req.Type == "connection.test" {
+			if hasSecretAction {
+				return Request{}, errInvalid
+			}
+		} else {
+			if !hasSecretAction {
+				return Request{}, errInvalid
+			}
+			// replace requires the password; keep/delete must not carry one.
+			if req.SecretAction == "replace" && !hasPass {
+				return Request{}, errInvalid
+			}
+			if req.SecretAction != "replace" && hasPass {
+				return Request{}, errInvalid
+			}
+		}
 	default:
-		if hasProtocol || hasID || hasHash || hasURL || hasDelete || hasRef {
+		if hasProtocol || hasID || hasHash || hasURL || hasDelete || hasRef || connFields {
 			return Request{}, errInvalid // unknown types are type-only
 		}
 	}
 	return req, nil
+}
+
+// validConnURL bounds the v1.4 URL field: non-empty, ≤ 2048 bytes, no
+// control characters. Full scheme/host/path policy lives in the
+// connection manager (ADR-0008 §2), which answers invalid shapes with
+// a status, not a protocol error.
+func validConnURL(u string) bool {
+	if u == "" || len(u) > 2048 {
+		return false
+	}
+	for _, r := range u {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }

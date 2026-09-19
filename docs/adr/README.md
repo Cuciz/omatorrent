@@ -14,6 +14,8 @@ decision; implementation must conform until an ADR explicitly supersedes it.
 | [0005](0005-ipc-v1-1-torrent-state.md) | IPC v1.1: read-only torrent state delivery via subscription | ACCEPTED |
 | [0006](0006-ipc-v1-2-mutations.md) | IPC v1.2: staged torrent mutation contract (accepted/result, ref replay, explicit delete_files) | ACCEPTED |
 | [0007](0007-ipc-v1-3-dashboard-aggregates.md) | IPC v1.3: daemon-side dashboard aggregates (current-state poll surface) | ACCEPTED |
+| [0008](0008-remote-connection-management.md) | Remote connection management, IPC v1.4 and backend epochs | ACCEPTED |
+| [0009](0009-secret-storage-secret-service.md) | Credential storage via the freedesktop Secret Service | ACCEPTED |
 
 ## Format
 

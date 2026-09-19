@@ -93,6 +93,19 @@ type State struct {
 // StatusLoading is State.LastError until the first sync cycle completes.
 const StatusLoading = "loading"
 
+// LastError class tokens (classify()); the connection manager maps
+// them one-to-one onto IPC v1.4 status codes (ADR-0008 §7).
+const (
+	ErrClassBadCredentials         = "bad credentials"
+	ErrClassBanned                 = "banned"
+	ErrClassUnauthorized           = "unauthorized"
+	ErrClassUnreachable            = "unreachable"
+	ErrClassCredentialsUnavailable = "credentials unavailable"
+	ErrClassTLSUntrusted           = "tls untrusted"
+	ErrClassTLSHostname            = "tls hostname"
+	ErrClassUnexpected             = "unexpected response"
+)
+
 // Change is the delta of one committed cycle, for subscription pushes.
 type Change struct {
 	Seq     uint64
@@ -131,18 +144,35 @@ func (o *Options) fill() {
 // Syncer synchronizes daemon state against qBittorrent and publishes
 // committed states plus change events to subscribers.
 type Syncer struct {
-	backend Backend
-	opts    Options
-	log     *slog.Logger
+	opts Options
+	log  *slog.Logger
 
-	mu  sync.RWMutex
-	cur State
-	rid int64 // 0 = next response must be a full update
-	ver bool  // versions probed this backend epoch
+	mu      sync.RWMutex
+	backend Backend // swapped by SwitchBackend (read under mu)
+	epoch   uint64  // backend identity generation (ADR-0008 §8)
+	cur     State
+	rid     int64 // 0 = next response must be a full update
+	ver     bool  // versions probed this backend epoch
+
+	// Auth frugality (ADR-0008 §6): consecutive rejected logins back
+	// off hard, and after stickyMaxAuthFails the syncer stops
+	// contacting the backend entirely (below qBittorrent's 5-attempt
+	// IP ban) until the connection is reconfigured.
+	authFails      int
+	stickyAuthFail bool
+	// lastCycleClass is the backoff class of the most recent cycle
+	// ("auth" or ""); set by cycle, read by Run immediately after.
+	lastCycleClass string
+
+	kick chan struct{} // wakes Run for an immediate cycle (switch)
 
 	subsMu sync.Mutex
 	subs   map[chan Change]struct{}
 }
+
+// StickyAuthFails is the consecutive bad-credential login count that
+// parks the syncer in auth_failed without further backend contact.
+const StickyAuthFails = 3
 
 // New creates a Syncer. Call Run to start the sync loop.
 func New(backend Backend, opts Options, log *slog.Logger) *Syncer {
@@ -154,6 +184,7 @@ func New(backend Backend, opts Options, log *slog.Logger) *Syncer {
 		backend: backend,
 		opts:    opts,
 		log:     log,
+		kick:    make(chan struct{}, 1),
 		cur:     State{Torrents: map[string]Torrent{}, LastError: StatusLoading},
 		subs:    map[chan Change]struct{}{},
 	}
@@ -171,6 +202,59 @@ func (s *Syncer) Health() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cur.BackendOK
+}
+
+// SwitchBackend atomically replaces the backend (epoch bump, ADR-0008
+// §8): the rid and version probes reset, ALL torrent state is dropped
+// and published as removals (subscribers can never see backend A
+// torrents as backend B's), auth-frugality counters clear, and the
+// next cycle runs immediately. Cycles still in flight for the old
+// epoch are discarded at commit (see cycle).
+func (s *Syncer) SwitchBackend(b Backend) {
+	s.mu.Lock()
+	removed := make([]string, 0, len(s.cur.Torrents))
+	for h := range s.cur.Torrents {
+		removed = append(removed, h)
+	}
+	s.backend = b
+	s.epoch++
+	s.rid = 0
+	s.ver = false
+	s.authFails = 0
+	s.stickyAuthFail = false
+	next := s.cur.shallowCopy()
+	next.Torrents = map[string]Torrent{}
+	next.BackendOK = false
+	next.DlSpeed, next.UpSpeed = 0, 0
+	next.FreeSpace = nil
+	next.AppVersion, next.WebAPIVersion = "", ""
+	next.ConnectionStatus = ""
+	next.LastError = StatusLoading
+	next.Generation++
+	s.cur = next
+	// Removals publish under s.mu together with the state replacement
+	// (ordering vs in-flight cycle deltas — security review F3).
+	if len(removed) > 0 {
+		s.publishLocked(Change{Seq: next.Generation, Changed: nil, Removed: removed})
+	}
+	s.mu.Unlock()
+
+	select {
+	case s.kick <- struct{}{}:
+	default:
+	}
+}
+
+// CycleForTest drives one cycle synchronously (deterministic tests).
+func (s *Syncer) CycleForTest() bool {
+	return s.cycle(context.Background(), s.opts.FetchBg)
+}
+
+// Epoch returns the current backend epoch.
+func (s *Syncer) Epoch() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.epoch
 }
 
 // Subscribe returns the current committed state and a channel of
@@ -209,8 +293,20 @@ func (s *Syncer) Run(ctx context.Context) {
 		s.mu.RUnlock()
 
 		ok := s.cycle(ctx, s.opts.FetchBg)
+		class := s.lastCycleClass
 		if ok {
 			backoff = s.opts.Interval
+		} else if class == "auth" {
+			// Authentication-class failures back off hard (ban
+			// frugality, ADR-0008 §6): 30 s doubling, 10 min cap.
+			if backoff < 30*time.Second {
+				backoff = 30 * time.Second
+			} else {
+				backoff *= 2
+			}
+			if backoff > 10*time.Minute {
+				backoff = 10 * time.Minute
+			}
 		} else {
 			backoff *= 2
 			if backoff > s.opts.MaxBackoff {
@@ -230,6 +326,7 @@ func (s *Syncer) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.kick:
 		case <-time.After(backoff):
 		}
 	}
@@ -254,26 +351,54 @@ type partialTorrent struct {
 // cycle performs one sync. On any error or malformed payload the
 // previous committed state is preserved untouched (last-known-good) and
 // only the degraded flag/error update.
+// cycle performs one sync. On any error or malformed payload the
+// previous committed state is preserved untouched (last-known-good).
+// The backoff class of the last cycle is exposed via lastCycleClass
+// (read by Run immediately after the call; single-goroutine use).
 func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
+	var class string
+	defer func() { s.lastCycleClass = class }()
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Capture backend AND epoch together under the same lock a switch
+	// uses; the epoch is re-checked at commit so a cycle racing a
+	// backend switch can never publish stale-epoch state (ADR-0008 §8).
 	s.mu.RLock()
 	rid, ver, prev := s.rid, s.ver, s.cur
+	epoch := s.epoch
+	backend := s.backend
+	sticky := s.stickyAuthFail
 	s.mu.RUnlock()
+
+	// Sticky auth failure: the stored credentials were rejected
+	// StickyAuthFails times in a row; contacting the backend again
+	// only feeds qBittorrent's IP ban. Park until reconfiguration.
+	if sticky {
+		class = "auth"
+		s.commitDegradedEpoch(epoch, errors.New(ErrClassBadCredentials))
+		return false
+	}
 
 	// Login once per backend epoch (first cycle / after degradation);
 	// SID expiry mid-session is handled inside the adapter (403 retry).
 	if !prev.BackendOK {
-		if err := s.backend.Login(cctx); err != nil {
-			s.commitDegraded(err)
+		if err := backend.Login(cctx); err != nil {
+			class = s.noteAuthFailure(err)
+			s.commitDegradedEpoch(epoch, err)
 			return false
 		}
+		s.mu.Lock()
+		if s.epoch == epoch {
+			s.authFails = 0
+		}
+		s.mu.Unlock()
 	}
 
-	md, err := s.backend.SyncMaindata(cctx, rid)
+	md, err := backend.SyncMaindata(cctx, rid)
 	if err != nil {
-		s.commitDegraded(err)
+		class = s.noteAuthFailure(err) // counts mid-session re-login rejects too (review F5)
+		s.commitDegradedEpoch(epoch, err)
 		return false
 	}
 
@@ -289,12 +414,12 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 		next.Torrents = make(map[string]Torrent, len(md.Torrents))
 		for h, raw := range md.Torrents {
 			if !validHash(h) {
-				s.commitDegraded(errors.New("malformed full update: bad hash"))
+				s.commitDegradedEpoch(epoch, errors.New("malformed full update: bad hash"))
 				return false
 			}
 			t, err := decodeFull(raw)
 			if err != nil {
-				s.commitDegraded(fmt.Errorf("malformed full update for hash %d", len(h)))
+				s.commitDegradedEpoch(epoch, fmt.Errorf("malformed full update for hash %d", len(h)))
 				return false
 			}
 			t.Hash = h
@@ -314,12 +439,12 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 	} else {
 		for h, raw := range md.Torrents {
 			if !validHash(h) {
-				s.commitDegraded(errors.New("malformed delta: bad hash"))
+				s.commitDegradedEpoch(epoch, errors.New("malformed delta: bad hash"))
 				return false
 			}
 			var p partialTorrent
 			if err := json.Unmarshal(raw, &p); err != nil {
-				s.commitDegraded(fmt.Errorf("malformed delta for hash %d", len(h)))
+				s.commitDegradedEpoch(epoch, fmt.Errorf("malformed delta for hash %d", len(h)))
 				return false
 			}
 			t := next.Torrents[h] // zero value if new
@@ -375,20 +500,75 @@ func (s *Syncer) cycle(ctx context.Context, timeout time.Duration) bool {
 
 	next.Generation = prev.Generation + 1
 	s.mu.Lock()
+	if s.epoch != epoch {
+		// A backend switch happened while this cycle was in flight:
+		// discard the stale-epoch commit entirely.
+		s.mu.Unlock()
+		return false
+	}
 	s.cur = next
 	s.rid = md.RID
-	s.mu.Unlock()
-
+	// Publish UNDER s.mu (non-blocking sends): a concurrent
+	// SwitchBackend — which also publishes under s.mu — can never
+	// reorder around this delta and resurrect old-backend rows in a
+	// subscriber's view after the switch's removals (security review F3).
 	if len(changed) > 0 || len(removed) > 0 || !prev.BackendOK {
-		s.publish(Change{Seq: next.Generation, Changed: changed, Removed: removed})
+		s.publishLocked(Change{Seq: next.Generation, Changed: changed, Removed: removed})
 	}
+	s.mu.Unlock()
 	return true
 }
 
+// noteAuthFailure tracks consecutive authentication-class failures
+// (bad credentials, ban, credentials unavailable) and latches the
+// sticky state at StickyAuthFails. Returns the backoff class.
+func (s *Syncer) noteAuthFailure(err error) string {
+	class := errClass(err)
+	if class != "auth" {
+		return class
+	}
+	// Counters are epoch-scoped: SwitchBackend clears them together
+	// with the epoch bump under the same lock, so incrementing here is
+	// safe without a further guard.
+	s.mu.Lock()
+	s.authFails++
+	if s.authFails >= StickyAuthFails {
+		s.stickyAuthFail = true
+	}
+	s.mu.Unlock()
+	return class
+}
+
+// errClass maps adapter errors to the Run-loop backoff class:
+// "auth" (ban frugality ladder), "" (ordinary exponential backoff).
+func errClass(err error) string {
+	switch {
+	case errors.Is(err, qbittorrent.ErrBadCredentials),
+		errors.Is(err, qbittorrent.ErrBanned),
+		errors.Is(err, qbittorrent.ErrCredentialsUnavailable):
+		return "auth"
+	default:
+		return ""
+	}
+}
+
 // commitDegraded keeps last-known-good torrents but flags the backend.
+// (Legacy entry for callers without an epoch; tests.)
 func (s *Syncer) commitDegraded(err error) {
+	s.mu.RLock()
+	epoch := s.epoch
+	s.mu.RUnlock()
+	s.commitDegradedEpoch(epoch, err)
+}
+
+// commitDegradedEpoch is the epoch-aware degraded commit: a cycle from
+// a superseded epoch may not clobber the state a newer epoch owns.
+func (s *Syncer) commitDegradedEpoch(epoch uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.epoch != epoch {
+		return
+	}
 	prev := s.cur
 	next := prev.shallowCopy()
 	next.BackendOK = false
@@ -405,6 +585,19 @@ func (s *Syncer) commitDegraded(err error) {
 func (s *Syncer) publish(ch Change) {
 	s.subsMu.Lock()
 	defer s.subsMu.Unlock()
+	s.publishToSubs(ch)
+}
+
+// publishLocked is publish for callers already holding s.mu (the
+// non-blocking sends keep the lock section short; lock order
+// s.mu -> subsMu matches Subscribe).
+func (s *Syncer) publishLocked(ch Change) {
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	s.publishToSubs(ch)
+}
+
+func (s *Syncer) publishToSubs(ch Change) {
 	for c := range s.subs {
 		select {
 		case c <- ch:
@@ -511,14 +704,20 @@ func (st State) shallowCopy() State {
 func classify(err error) string {
 	switch {
 	case errors.Is(err, qbittorrent.ErrBadCredentials):
-		return "bad credentials"
+		return ErrClassBadCredentials
 	case errors.Is(err, qbittorrent.ErrBanned):
-		return "banned"
+		return ErrClassBanned
+	case errors.Is(err, qbittorrent.ErrCredentialsUnavailable):
+		return ErrClassCredentialsUnavailable
+	case errors.Is(err, qbittorrent.ErrTLSUntrusted):
+		return ErrClassTLSUntrusted
+	case errors.Is(err, qbittorrent.ErrTLSHostname):
+		return ErrClassTLSHostname
 	case errors.Is(err, qbittorrent.ErrUnauthorized):
-		return "unauthorized"
+		return ErrClassUnauthorized
 	case errors.Is(err, qbittorrent.ErrUnreachable):
-		return "unreachable"
+		return ErrClassUnreachable
 	default:
-		return "unexpected response"
+		return ErrClassUnexpected
 	}
 }
