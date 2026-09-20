@@ -203,3 +203,40 @@ Final framing pass (advisory fixes): all panel captures re-cropped to
 the full popout (590x640; the panel is 540 px wide at this theme's
 1.5 spacing scale) and dashboards to the card (880x950), removing
 ambient desktop content from a public repo.
+
+## External-review follow-up: list-area sizing regression (fixed)
+
+The external review of PR #13 caught a regression introduced by the
+zero-height fix: the list area had become a permanently max-height
+(340-unit) block, so healthy panels with 1-3 torrents wasted a large
+blank body — a break from the native compact-panel behavior.
+
+Fix: the list area is now content-driven while rows exist
+(`Math.min(listView.contentHeight, Style.space(340))`) with a
+100-unit floor when `view.count === 0` (the only state that needs
+it — degraded WITH last-known rows keeps content sizing so the rows
+stay visible under the centered diagnostic, as before). The
+KeyboardPanel window height follows the same content
+(`Style.space(120)` chrome + live list height + conditional rows),
+so few torrents mean a compact panel again.
+
+Measured card heights (connected-component analysis of the card
+surface, theme scale 1.5, deterministic):
+
+| State | Card size (px) | Rule |
+|---|---|---|
+| 0 torrents (healthy empty) | 534×324 | overlay floor |
+| 1 torrent | 534×194 | content-driven |
+| 3 torrents | 534×239 | content-driven |
+| 34 torrents | 534×684 | capped (340-unit list) + scroll |
+| degraded, 1 last-known row | 534×194 | content-driven + centered diagnostic |
+
+Zero-result filter: not runtime-capturable this session (selecting a
+filter needs pointer input; no input-automation tool installed) — it
+shares the overlay floor with the healthy-empty state through the
+identical `view.count === 0` branch, whose rendering is proven above
+and in the committed captures. All seven panel screenshots were
+re-taken against the adaptive build; the empty state's brand-green
+count re-verified (4,922 px). Vision checks (open prompt): 3-torrent
+panel compact, brand empty state fully visible, degraded diagnostic
+visible with the last-known row beneath.
