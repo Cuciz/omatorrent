@@ -43,7 +43,7 @@ backend epochs with drain-serialized configure transactions, IPC v1.4
 8f0b515; three external review rounds closed (final: APPROVE FOR
 MERGE, no blockers). Evidence: docs/agent/PHASE05.md.
 
-## Phase 0.5.1 — Sprout rebrand (IMPLEMENTED on feat/phase051-sprout-rebrand; issue #11 — see docs/agent/PHASE051.md)
+## Phase 0.5.1 — Sprout rebrand (COMPLETE — merged PR #13 @ d1a0eec, issue #11 closed; record: docs/agent/PHASE051.md)
 
 Public product identity becomes **Sprout** ("Torrent client for
 Omarchy"), replacing the user-facing OmaTorrent brand BEFORE advanced

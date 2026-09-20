@@ -5,19 +5,19 @@ current state. Keep under ~60 lines. Do not paste conversations.
 
 ## CURRENT OBJECTIVE
 
-Phase 0.5 MERGED (PR #10 @ merge `6563bd4`, approved head `8f0b515`,
-issue #9 closed; final record docs/agent/PHASE05.md incl. merge SHA
-and the three external-review rounds). **CURRENT MILESTONE:
-0.5.1 — SPROUT REBRAND IMPLEMENTED** (branch
-`feat/phase051-sprout-rebrand`, issue #11, investigation issue #12, PR pending;
-brand spec docs/BRAND.md, evidence docs/agent/PHASE051.md; technical
-identifiers NOT renamed — pre-1.0 migration list in BRAND.md). After
-merge, the next milestone is 0.6 (torrent controls; NOT started).
-Phase 0.6 has NOT started; VPN/NAS/network monitoring remain out of
-scope.
+**Phase 0.5.1 (Sprout rebrand) MERGED: PR #13 @ merge `d1a0eec`,
+approved head `6fceae6`, issue #11 closed; brand spec docs/BRAND.md,
+evidence docs/agent/PHASE051.md; investigation issue #12 open as the
+record. Public product identity is Sprout; technical identifiers NOT
+renamed — pre-1.0 migration list in BRAND.md. NEXT MILESTONE: 0.6 —
+advanced torrent controls (NOT started; VPN/NAS/network monitoring
+remain out of scope).**
 
 ## COMPLETED
 
+- Phase 0.5.1 (Sprout rebrand) MERGED (PR #13 @ `d1a0eec`, approved
+  head `6fceae6`, issue #11 closed; final record docs/agent/PHASE051.md
+  incl. merge SHA and the four review rounds).
 - Phase 0 (merged, PR #2); Phase 0.2 (merged, PR #4 @ 3e090d5, issue #3
   closed; final record docs/agent/PHASE02.md incl. merge SHA).
 - Phase 0.3 MERGED (PR #6 @ `fc8615f`, issue #5 closed; final record

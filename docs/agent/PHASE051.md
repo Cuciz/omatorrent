@@ -1,6 +1,11 @@
 # Phase 0.5.1 — Sprout rebrand (issue #11)
 
-Branch: feat/phase051-sprout-rebrand. Baseline: main @ fba4aa6.
+Branch: feat/phase051-sprout-rebrand (merged and deleted). Baseline:
+main @ fba4aa6. **MERGED: PR #13, approved head 6fceae6, merge commit
+d1a0eec592b5b3699cb4c2521073987aa2ba5166 (2026-09-20); issue #11
+closed on merge. Phase 0.5.1 COMPLETE — public product identity is
+Sprout. Next milestone: Phase 0.6 advanced torrent controls (not
+started).**
 
 ## What changed
 
