@@ -1,4 +1,4 @@
-# OmaTorrent — Quickshell / Omarchy Quattro Development Notes
+# Sprout — Quickshell / Omarchy Quattro Development Notes
 
 Status: VERIFIED (Phase 0, 2026-09-18) — environment facts, reference
 implementations studied, and pitfalls actually hit while building the
@@ -15,7 +15,7 @@ Phase 0 proof widget. Version-sensitive; re-verify per installed Omarchy.
   plugin loader: `/usr/share/omarchy/shell/shell.qml` +
   `services/PluginRegistry.qml`.
 - User plugin area: `~/.config/omarchy/plugins/`, naming `author.plugin`
-  (OmaTorrent uses dev ID `local.omatorrent`; public ID OPEN).
+  (Sprout uses dev ID `local.omatorrent`; public ID OPEN — technical IDs keep the omatorrent name, docs/BRAND.md).
 - Plugin validation: `omarchy plugin validate <folder>` (schema 1).
 
 ## Reference components (studied for Phase 0)
@@ -31,7 +31,8 @@ Phase 0 proof widget. Version-sensitive; re-verify per installed Omarchy.
    (`import qs.Commons` — usable verbatim from third-party plugins).
    `Color.foreground/muted/urgent/accent`, `Style.font.family/body`,
    `Style.space(n)`, `Style.cornerRadius`. Dark/light switches re-evaluate
-   all bindings live. No hard-coded colors anywhere in OmaTorrent QML.
+   all bindings live. No hard-coded colors in Sprout QML except the documented
+   brand accent (empty-state wordmark, docs/BRAND.md).
 3. **Buttons** — `Ui/WidgetButton.qml`: `text`, `foreground`,
    `fontFamily/fontSize`, `tooltipText`, `fixedWidth`, `vertical`
    handling; self-styling from bar tokens. The proof widget uses it
@@ -40,17 +41,17 @@ Phase 0 proof widget. Version-sensitive; re-verify per installed Omarchy.
    `~/.config/omarchy/plugins/jeffmtb.moon-phase/BarWidget.qml`: extends
    `BarWidget`, `WidgetButton` content row, tooltip, panel loader +
    `injectPanel()`, `SystemClock` refresh. Closest first-party-looking
-   citizen; OmaTorrent's manifest mirrors its shape.
+   citizen; Sprout's manifest mirrors its shape.
 5. **Service/polling anti-pattern to avoid** —
    `/usr/share/omarchy/shell/plugins/panels/tailscale/Service.qml` (and
    `weather/Panel.qml`): `Process` + `Timer` polling in QML. Omarchy
-   built-ins do this for simple CLI wrappers, but for OmaTorrent this is
+   built-ins do this for simple CLI wrappers, but for Sprout this is
    exactly what the daemon replaces (ADR-0001); the bar widget polls the
    local daemon socket only.
 6. **Local prior art (counter-example)** —
    `~/.config/omarchy/plugins/local.networks/NetworkStrip.qml`: a panel
    that does `XMLHttpRequest` **directly to the qBittorrent WebUI from
-   QML** (~lines 105–135) — the precise ADR-0001 violation OmaTorrent
+   QML** (~lines 105–135) — the precise ADR-0001 violation Sprout
    exists to avoid. Do not copy its transport; its layer-shell placement
    code is otherwise a fine reference.
 
@@ -67,7 +68,7 @@ Color.popups surface + Style.cornerRadius handled by the base).
 `PanelKeyCatcher` provides close-on-focus-loss and panel switching. The
 widget exposes open()/close()/toggle()/opened so `omarchy-shell shell
 toggle <id>` works. Reference: /usr/share/omarchy/shell/plugins/panels/
-clock/{BarWidget,Panel}.qml; OmaTorrent's implementation mirrors it.
+clock/{BarWidget,Panel}.qml; Sprout's implementation mirrors it.
 
 ## Overlay-plugin pattern (verified Phase 0.4, first-party menu model)
 
@@ -135,7 +136,7 @@ clock/{BarWidget,Panel}.qml; OmaTorrent's implementation mirrors it.
 4. Derive visuals from the active Omarchy theme; dark/light coherence.
 5. Truthful degraded states; integrate with Omarchy's global interface;
    no second navigation hub; no fake-terminal aesthetics.
-6. Visual rule for OmaTorrent: indistinguishable from a first-party
+6. Visual rule for Sprout: indistinguishable from a first-party
    Omarchy plugin — native tokens, transparent-first surfaces, native
    spacing/radii, minimal chrome, no RGB/cyberpunk decoration, no
    standalone-desktop-app look, no card-dashboard aesthetic.

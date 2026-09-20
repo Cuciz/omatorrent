@@ -1,4 +1,4 @@
-# OmaTorrent — IPC Contract v1
+# Sprout — IPC Contract v1
 
 Status: v1 (ADR-0004) + v1.1 extension (ADR-0005, read-only torrent
 state) + v1.2 extension (ADR-0006, staged mutations) + v1.3 extension

@@ -1,4 +1,4 @@
-# OmaTorrent — ZCode Development Harness
+# Sprout — ZCode Development Harness
 
 The harness is the `omatorrent-dev-harness` ZCode plugin in
 `tools/zcode-marketplace/`. It is development infrastructure, never the

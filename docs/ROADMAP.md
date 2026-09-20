@@ -1,4 +1,4 @@
-# OmaTorrent — Roadmap
+# Sprout — Roadmap
 
 Status: DRAFT. Version numbers are planning anchors, not promises.
 Dependencies and exit criteria use the evidence rules from
@@ -6,9 +6,9 @@ Dependencies and exit criteria use the evidence rules from
 
 ## Product scope [DECISION 2026-09-19 — binding]
 
-OmaTorrent stays **strictly torrent-focused**:
+Sprout stays **strictly torrent-focused**:
 
-- **VPN monitoring is removed from OmaTorrent's scope entirely.** VPN
+- **VPN monitoring is removed from Sprout's scope entirely.** VPN
   state/monitoring is owned by another existing Omarchy plugin and must
   not be duplicated here.
 - General-purpose NAS administration and general network monitoring are
@@ -43,7 +43,7 @@ backend epochs with drain-serialized configure transactions, IPC v1.4
 8f0b515; three external review rounds closed (final: APPROVE FOR
 MERGE, no blockers). Evidence: docs/agent/PHASE05.md.
 
-## Phase 0.5.1 — Sprout rebrand (NEXT, binding product decision)
+## Phase 0.5.1 — Sprout rebrand (IMPLEMENTED on feat/phase051-sprout-rebrand; issue #11 — see docs/agent/PHASE051.md)
 
 Public product identity becomes **Sprout** ("Torrent client for
 Omarchy"), replacing the user-facing OmaTorrent brand BEFORE advanced

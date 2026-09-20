@@ -1,4 +1,4 @@
-# OmaTorrent — Packaging & Distribution
+# Sprout — Packaging & Distribution
 
 Status: PLACEHOLDER — packaging begins at 0.9. Nothing here is implemented;
 this file records the decided direction and the open questions.

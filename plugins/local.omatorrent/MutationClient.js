@@ -1,4 +1,5 @@
-// OmaTorrent mutation client state machine (IPC v1.2, ADR-0006).
+// Sprout mutation client state machine (OmaTorrent internals;
+// IPC v1.2, ADR-0006).
 //
 // Pure presentation-side bookkeeping: request/terminal correlation for
 // staged mutations. It understands ONLY the daemon's wire shapes

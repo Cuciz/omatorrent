@@ -1,4 +1,4 @@
-# OmaTorrent — qBittorrent Capability Matrix
+# Sprout — qBittorrent Capability Matrix
 
 Status: VERIFIED (Phase 0, 2026-09-18) — every entry carries its source and
 version range. Classifications: CONFIRMED (verified live against the
@@ -87,7 +87,7 @@ source tags release-5.0.0/5.1.0/5.2.0/5.2.3.
 
 - FACT: `POST /api/v2/torrents/stop` and `POST /api/v2/torrents/start`
   take a form/query field `hashes` — multiple hashes separated by `|`, or
-  the keyword `all`. OmaTorrent always sends EXACTLY ONE hash and never
+  the keyword `all`. Sprout always sends EXACTLY ONE hash and never
   `all` (blast-radius rule).
   SOURCE: wiki (both page eras); live form-encoded probes.
 - FACT: both return **HTTP 200 with an empty body in all scenarios** —
@@ -171,9 +171,9 @@ source tags release-5.0.0/5.1.0/5.2.0/5.2.3.
   (data kept); `deleteFiles=true` also removes downloaded data
   (live-exercised only on the file-less disposable research torrent).
 - FACT: a removed hash can be re-added afterwards (observed accepted).
-- DESIGN RULES (binding for OmaTorrent): the adapter ALWAYS sends
+- DESIGN RULES (binding for Sprout): the adapter ALWAYS sends
   `deleteFiles` explicitly (`true`/`false`, never omitted — no reliance
-  on any backend default); OmaTorrent never sends multiple hashes or the
+  on any backend default); Sprout never sends multiple hashes or the
   `all` keyword to a destructive endpoint; the IPC layer requires an
   explicit boolean and rejects ambiguous/missing intent.
 
@@ -282,7 +282,7 @@ the installed 5.2.3 (NO login POSTs against the real instance — its
   the 401-on-cross-origin-GET half CONFIRMED LIVE.
 - FACT: requests carrying **neither `Origin` nor `Referer` are explicitly
   allowed** on 4.6→5.2 (source comment: blocking would "lead Web API
-  users to spoof headers"). OmaTorrent sends neither.
+  users to spoof headers"). Sprout sends neither.
   SOURCE: `isCrossSiteRequest`, verified identical v4_6_x→v5_2_x + LIVE.
 - FACT: Host header validation (default ON) compares Host (incl. port)
   against the listen port + `WebUI\ServerDomains` (default `*`); the fix
@@ -299,7 +299,7 @@ the installed 5.2.3 (NO login POSTs against the real instance — its
   cleared on success/restart; **0 disables banning** — the wiki's
   recommendation behind shared proxies).
   SOURCE: `preferences.cpp`, `webapplication.cpp` `m_clientFailedLogins`.
-  IMPLICATION: OmaTorrent's syncer goes sticky `auth_failed` after 3
+  IMPLICATION: Sprout's syncer goes sticky `auth_failed` after 3
   consecutive bad-credential logins (ADR-0008 §6) — polling can never
   reach the ban threshold by itself.
 - FACT: `WebUI\LocalHostAuth` **defaults to true (auth required even
@@ -339,12 +339,12 @@ the installed 5.2.3 (NO login POSTs against the real instance — its
 - FACT: qBittorrent has **no base-path option** — API routing is
   anchored at root. Sub-path deployments are done by **prefix stripping
   at the proxy** (official NGINX/IIS ARR/Traefik/Caddy recipes; e.g.
-  public `/qbt` → `proxy_pass http://127.0.0.1:30000/`). OmaTorrent
+  public `/qbt` → `proxy_pass http://127.0.0.1:30000/`). Sprout
   therefore accepts base URLs with a path component and requests
   `{base}/api/v2/...`; cookie `path=/` works under a public prefix.
   SOURCE: wiki reverse-proxy pages + `m_apiPathPattern`.
 
-### Version compatibility (endpoints OmaTorrent uses, 2026-09)
+### Version compatibility (endpoints Sprout uses, 2026-09)
 
 - Maintained series: **5.2.x is the only line receiving releases**
   (5.2.3 2026-07-07; 5.3.0beta1 2026-09-05; 5.1.4/5.0.5/4.6.7 are last
@@ -356,7 +356,7 @@ the installed 5.2.3 (NO login POSTs against the real instance — its
 - `torrents/add`: **5.2 answers JSON** `{success_count, failure_count,
   pending_count, added_torrent_ids}` with **202 when pending_count>0**
   and 409 when nothing was added; ≤ 5.1 answers `200 "Ok."/"Fails."`.
-  The `paused` param became `stopped` in 5.0 (unused by OmaTorrent).
+  The `paused` param became `stopped` in 5.0 (unused by Sprout).
 - `torrents/stop`/`start`: since 5.0 (WebAPI 2.11.x); `pause`/`resume`
   removed in 5.0 (live journal proof on this box). Existing
   version-gated fallback (empty version → modern; unparseable → legacy)
@@ -387,7 +387,7 @@ the installed 5.2.3 (NO login POSTs against the real instance — its
    jar; the daemon rebuilds from `full_update:true` responses (rid=0,
    session loss, backend restart) instead of re-polling on its own.
 4. Minimum supported WebAPI version: **PROPOSED 2.3.0** (highest minimum
-   among endpoints OmaTorrent needs before 1.0: tags). The reference
+   among endpoints Sprout needs before 1.0: tags). The reference
    deployment is 2.15.1; a formal compat matrix is a later-phase task —
    do not claim broader support than tested.
 5. Mutations (0.3): stop/start when WebAPI ≥ 2.11.0, pause/resume
