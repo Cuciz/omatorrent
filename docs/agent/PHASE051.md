@@ -49,7 +49,7 @@ the approved brand reference.
 |---|---|---|---|
 | 1 | Bar widget (glyph + speeds) | PASS — glyph crisp, optically aligned, single render | phase051-bar.png |
 | 2 | Panel populated (local, long torrent name) | PASS — two-row header; long name elides | phase051-panel-local.png |
-| 3 | Panel empty state | PASS — deterministic pixel proof (4,922 brand-green px) + open-prompt vision check; TWO bugs fixed en route: wordmark sized 21×5 px (UI review) and a zero-height ListView collapse that made every empty/degraded list message invisible since Phase 0.2 (see below) | phase051-panel-empty.png |
+| 3 | Panel empty state | PASS — deterministic pixel proof (brand-green count in the thousands; method: magick -fuzz 12% opaque count) + open-prompt vision check; TWO bugs fixed en route: wordmark sized 21×5 px (UI review) and a zero-height ListView collapse that made every empty/degraded list message invisible since Phase 0.2 (see below) | phase051-panel-empty.png |
 | 4 | Panel auth_required (live fixture) | PASS — truthful callout + settings link + last-known | phase051-panel-auth-required.png |
 | 5 | Panel auth_failed (live, wrong password) | PASS — sticky class | phase051-panel-auth-failed.png |
 | 6 | Panel TLS failure (live, self-signed) | PASS — tls_hostname, no-downgrade copy | phase051-panel-tls-failed.png |
@@ -164,9 +164,13 @@ never have rendered (present since Phase 0.2; never noticed because
 the dev backend always had torrents). Fix: the list area is now a
 fixed-height Item; the ListView fills it; the brand empty state,
 filter-empty message, and degraded message are overlays on the area.
-Verified live: 4,922 brand-green pixels (wordmark) + open-prompt
-vision confirmation of glyph/wordmark/copy/Add-magnet; populated
-panel re-captured on the same build.
+Verified live: brand-green pixel count (magick: -fuzz 12% opaque
+count for #A1D06A) — 4,922 px in the working capture, 4,057-4,062 px
+in the final committed framing (crop geometry affects the absolute
+number; the method is the check, any count in the thousands with six
+letter clusters is the wordmark) — plus open-prompt vision
+confirmation of glyph/wordmark/copy/Add-magnet; populated panel
+re-captured on the same build.
 
 This also retroactively explains the issue #12 report: "Nothing in
 this filter" could not have been visible in the list area either —
@@ -175,3 +179,27 @@ further support for the transcription-artifact classification.
 The earlier session notes claiming the empty state "verified" before
 this fix were vision-tool hallucinations under leading prompts; all
 current evidence is deterministic (pixel counts) or open-prompt.
+
+## Final review round (pushed HEAD 891030c, after re-verification)
+
+All four independent reviews re-ran against the pushed HEAD and
+returned **APPROVE**:
+- Architecture: APPROVE (P3: record the pixel-count method — done
+  above; P4s: validate_brand regeneration writes assets, delegate
+  indentation, pixel-S/G legibility note).
+- Quickshell/UI: APPROVE (deterministic letter-cluster analysis of the
+  wordmark; confirmed the restructure, hardening, and all prior fixes;
+  advisory: capture framing cut the panel's left edge at this theme's
+  1.5 spacing scale — fixed in the final framing pass below).
+- Brand: APPROVE 10/10 (pixel-level verification of every asset; two
+  doc nits fixed below: lockup 94x18 not 93x18, generate.py docstring
+  filename).
+- QA: APPROVE (11/11 screenshots binary-identical at HEAD; empty-state
+  count independently reproduced; public-name, identifier, journal,
+  theme, and disposition checks all pass; advisory: ambient desktop
+  content beside the panel — fixed by the tighter framing).
+
+Final framing pass (advisory fixes): all panel captures re-cropped to
+the full popout (590x640; the panel is 540 px wide at this theme's
+1.5 spacing scale) and dashboards to the card (880x950), removing
+ambient desktop content from a public repo.

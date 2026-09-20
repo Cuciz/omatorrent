@@ -7,7 +7,7 @@ below are a clean-room reconstruction of the approved Sprout artwork
 geometry; every SVG/PNG/ASCII asset is derived from them.
 
 Run:  python3 assets/brand/generate.py
-Out:  assets/brand/*.svg, *.png, sprout-ascii.txt
+Out:  assets/brand/*.svg, *.png, sprout-blocks.txt
 
 PNG raster exports use integer cell multiples only (no interpolation);
 the SVGs are the scalable source of truth. QML never loads these files —

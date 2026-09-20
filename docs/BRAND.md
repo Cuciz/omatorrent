@@ -28,7 +28,7 @@ All three are generated from the same grids in `assets/brand/generate.py`.
 | Compact glyph | 12×10 | bar widget, panel header, dashboard header, 16–32 px |
 | Full glyph | 24×18 | empty state, README, larger brand contexts |
 | Wordmark | letters 8 modules tall | empty state title, README |
-| Lockup (glyph + wordmark) | 93×18 units | README, presentations |
+| Lockup (glyph + wordmark) | 94×18 units | README, presentations |
 | Terminal/block variant | `sprout-blocks.txt` | docs, terminal presentation |
 
 Construction facts (from the approved artwork): letters are **8 modules
