@@ -720,8 +720,12 @@ Panel {
     open: root.opened
     padding: Style.spacing.panelPadding
     contentWidth: Style.space(360)
+    // Window height follows content: fixed settings form, otherwise
+    // the non-list chrome (header rows, filters, banners — 460 was
+    // the old all-static value with the 340-unit list cap) plus the
+    // live list-area height, so few torrents mean a compact panel.
     contentHeight: root.settingsOpen ? Style.space(450)
-      : Style.space(460)
+      : Style.space(120) + listArea.height
       + (root.addOpen ? Style.space(12) : 0)
       + (root.confirmHash !== "" ? Style.space(13) : 0)
       + (root.mutError !== "" ? Style.space(6) : 0)
@@ -985,15 +989,23 @@ Panel {
           }
         }
 
-        // ---- Torrent list. Fixed-height area so the empty/degraded
-        //      overlays have a surface even when the list is empty
-        //      (a ListView sized by contentHeight collapses to zero
-        //      at count 0 and swallows centered children — the
-        //      pre-0.5.1 "No torrents" message never actually showed).
+        // ---- Torrent list. Content-driven while healthy rows exist
+        //      (the native compact panel: no blank body with few
+        //      torrents, growth capped + scrollable); fixed floor
+        //      otherwise so the centered overlays (brand empty state,
+        //      filter-empty, degraded) have a surface — a ListView
+        //      sized by its own contentHeight collapses to zero at
+        //      count 0 and swallows them (Phase 0.2-era bug).
         Item {
+          id: listArea
           visible: !root.settingsOpen
           width: parent.width
-          height: Style.space(340)
+          // Degraded WITH last-known rows keeps content sizing (rows
+          // stay visible under the centered diagnostic, as before);
+          // count 0 is the only state that needs the floor.
+          readonly property bool overlayMode: view.count === 0
+          height: overlayMode ? Style.space(100)
+            : Math.min(listView.contentHeight, Style.space(340))
 
           ListView {
             id: listView
